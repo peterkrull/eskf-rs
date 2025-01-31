@@ -6,6 +6,7 @@ use plotly::{Plot, Scatter};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
+use std::time::Instant;
 
 #[derive(Deserialize, Debug)]
 struct Variance {
@@ -131,16 +132,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     filter.predict(
         m.imu.acceleration,
         m.imu.rotation,
-        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(5).as_secs_f32(),
     );
     // Iterate measurements and update filter
     let mut last_time = m.time;
+    let mut count = 0;
+    let mut positions = 0;
+    println!("Starting run!!!!");
+    let time_now = Instant::now();
     for (i, m) in dataset.data.iter().skip(1).enumerate() {
+        count = i;
         let delta = std::time::Duration::from_secs_f32(m.time - last_time);
         last_time = m.time;
 
-        filter.predict(m.imu.acceleration, m.imu.rotation, delta);
+        filter.predict(m.imu.acceleration, m.imu.rotation, delta.as_secs_f32());
         if let Some(position) = m.gnss.position {
+            positions += 1;
             filter
                 .observe_position(position, position_variance)
                 .expect("Filter observation failed");
@@ -158,6 +165,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &filter.velocity_uncertainty(),
         );
     }
+    let duration = time_now.elapsed();
+
+    println!("Took time: {:?}", duration);
+    println!("Positions: {}", positions);
+    println!("Count: {}", count);
+
     plot_lines(vec![
         plot_pos.x, plot_pos.y, plot_pos.z, plot_vel.x, plot_vel.y, plot_vel.z,
     ]);

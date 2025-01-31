@@ -68,7 +68,7 @@ fn dataset1() {
     filter.predict(
         m.imu.acceleration,
         m.imu.rotation,
-        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(5).as_secs_f32(),
     );
     // Iterate measurements and update filter
     let mut last_time = m.time;
@@ -78,7 +78,7 @@ fn dataset1() {
         let delta = std::time::Duration::from_secs_f32(m.time - last_time);
         last_time = m.time;
 
-        filter.predict(m.imu.acceleration, m.imu.rotation, delta);
+        filter.predict(m.imu.acceleration, m.imu.rotation, delta.as_secs_f32());
         if let Some(position) = m.gnss.position {
             filter
                 .observe_position(position, position_variance)
