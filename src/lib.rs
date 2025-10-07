@@ -40,7 +40,8 @@
 use core::ops::{AddAssign, SubAssign};
 
 use nalgebra::{
-    Matrix, Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector, Vector2, Vector3, U15, U5
+    Matrix, Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector, Vector2, Vector3,
+    U15, U5,
 };
 #[cfg(feature = "no_std")]
 use num_traits::float::Float;
@@ -178,10 +179,10 @@ impl Builder {
             gyr_bias: Vector3::zeros(),
             gravity: Vector3::new(0.0, 0.0, self.gravity),
             covariance: SMatrix::<f32, 15, 15>::identity() * self.process_covariance,
-            var_acc: self.var_acc,
-            var_gyr: self.var_rot,
-            var_acc_bias: self.var_acc_bias,
-            var_gyr_bias: self.var_rot_bias,
+            acc_var: self.var_acc,
+            gyr_var: self.var_rot,
+            acc_bias_var: self.var_acc_bias,
+            gyr_bias_var: self.var_rot_bias,
         }
     }
 }
@@ -229,13 +230,13 @@ pub struct ESKF {
     /// Covariance of filter state
     covariance: SMatrix<f32, 15, 15>,
     /// Acceleration variance
-    var_acc: Vector3<f32>,
+    acc_var: Vector3<f32>,
     /// Angular velocity (gyro) variance
-    var_gyr: Vector3<f32>,
+    gyr_var: Vector3<f32>,
     /// Acceleration variance bias
-    var_acc_bias: Vector3<f32>,
+    acc_bias_var: Vector3<f32>,
     /// Angular velocity (gyro) variance bias
-    var_gyr_bias: Vector3<f32>,
+    gyr_bias_var: Vector3<f32>,
 }
 
 impl ESKF {
@@ -280,32 +281,31 @@ impl ESKF {
 
     /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
     /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
-    pub fn predict(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, delta_t: f32) {
-
+    pub fn predict(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
         let rot_acc_grav = self
             .orientation
             .transform_vector(&(acc_meas - self.acc_bias))
             + self.gravity;
-        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * delta_t);
+        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
         let orient_mat = self.orientation.to_rotation_matrix().into_inner();
         // Update internal state kinematics
-        self.position += self.velocity * delta_t + 0.5 * rot_acc_grav * delta_t.powi(2);
-        self.velocity += rot_acc_grav * delta_t;
+        self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
+        self.velocity += rot_acc_grav * dt;
         self.orientation *= norm_rot;
 
         // Propagate uncertainty, since we have not observed any new information about the state of
         // the filter we need to update our estimate of the uncertainty of the filer
-        let ident_delta = Matrix3::<f32>::identity() * delta_t;
+        let ident_delta = Matrix3::<f32>::identity() * dt;
         let mut error_jacobian = SMatrix::<f32, 15, 15>::identity();
         error_jacobian
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&ident_delta);
         error_jacobian
             .fixed_view_mut::<3, 3>(3, 6)
-            .copy_from(&(-orient_mat * skew(&(acc_meas - self.acc_bias)) * delta_t));
+            .copy_from(&(-orient_mat * skew(&(acc_meas - self.acc_bias)) * dt));
         error_jacobian
             .fixed_view_mut::<3, 3>(3, 9)
-            .copy_from(&(-orient_mat * delta_t));
+            .copy_from(&(-orient_mat * dt));
         error_jacobian
             .fixed_view_mut::<3, 3>(6, 6)
             .copy_from(&norm_rot.to_rotation_matrix().into_inner().transpose());
@@ -318,16 +318,130 @@ impl ESKF {
         let mut diagonal = self.covariance.diagonal();
         diagonal
             .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.var_acc * delta_t.powi(2));
+            .add_assign(self.acc_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.var_gyr * delta_t.powi(2));
+            .add_assign(self.gyr_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.var_acc_bias * delta_t);
+            .add_assign(self.acc_bias_var * dt);
         diagonal
             .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.var_gyr_bias * delta_t);
+            .add_assign(self.gyr_bias_var * dt);
+        self.covariance.set_diagonal(&diagonal);
+    }
+
+    /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
+    /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
+    ///
+    /// This is the optimized implementation that uses matrix symmetry to minimize memory operations.
+    pub fn predict_optimized(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
+        let rot_acc_grav = self
+            .orientation
+            .transform_vector(&(acc_meas - self.acc_bias))
+            + self.gravity;
+        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
+        let orient_mat = self.orientation.to_rotation_matrix().into_inner();
+        // Update internal state kinematics
+        self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
+        self.velocity += rot_acc_grav * dt;
+        self.orientation *= norm_rot;
+
+        // Block-entries of error jacobian and their transposes
+        let f36 = -orient_mat * skew(&(acc_meas - self.acc_bias)) * dt;
+        let f39 = -orient_mat * dt;
+        let f66 = norm_rot.to_rotation_matrix().into_inner().transpose();
+
+        // Extract the 15 upper-triangle blocks from the current covariance matrix
+        let p_1_1 = self.covariance.fixed_view::<3, 3>(0, 0).clone_owned();
+        let p_1_2 = self.covariance.fixed_view::<3, 3>(0, 3).clone_owned();
+        let p_1_3 = self.covariance.fixed_view::<3, 3>(0, 6).clone_owned();
+        let p_1_4 = self.covariance.fixed_view::<3, 3>(0, 9).clone_owned();
+        let p_1_5 = self.covariance.fixed_view::<3, 3>(0, 12).clone_owned();
+
+        let p_2_2 = self.covariance.fixed_view::<3, 3>(3, 3).clone_owned();
+        let p_2_3 = self.covariance.fixed_view::<3, 3>(3, 6).clone_owned();
+        let p_2_4 = self.covariance.fixed_view::<3, 3>(3, 9).clone_owned();
+        let p_2_5 = self.covariance.fixed_view::<3, 3>(3, 12).clone_owned();
+
+        let p_3_3 = self.covariance.fixed_view::<3, 3>(6, 6).clone_owned();
+        let p_3_4 = self.covariance.fixed_view::<3, 3>(6, 9).clone_owned();
+        let p_3_5 = self.covariance.fixed_view::<3, 3>(6, 12).clone_owned();
+
+        let p_4_4 = self.covariance.fixed_view::<3, 3>(9, 9).clone_owned();
+        let p_4_5 = self.covariance.fixed_view::<3, 3>(9, 12).clone_owned();
+
+        let p_5_5 = self.covariance.fixed_view::<3, 3>(12, 12).clone_owned();
+
+        // Row 1
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(p_1_1 + dt * (p_1_2.transpose() + p_1_2 + dt * p_2_2)));
+        self.covariance.fixed_view_mut::<3, 3>(0, 3).copy_from(
+            &(p_1_2
+                + dt * p_2_2
+                + (p_1_3 + dt * p_2_3) * f36.transpose()
+                + (p_1_4 + dt * p_2_4) * f39.transpose()),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 6)
+            .copy_from(&((p_1_3 + dt * p_2_3) * f66.transpose() - dt * (p_1_5 + dt * p_2_5)));
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 9)
+            .copy_from(&(p_1_4 + dt * p_2_4));
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 12)
+            .copy_from(&(p_1_5 + dt * p_2_5));
+
+        // Row 2
+        self.covariance.fixed_view_mut::<3, 3>(3, 3).copy_from(
+            &(p_2_2
+                + f36 * p_2_3.transpose()
+                + f39 * p_2_4.transpose()
+                + (p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f36.transpose()
+                + (p_2_4 + f36 * p_3_4 + f39 * p_4_4) * f39.transpose()),
+        );
+        self.covariance.fixed_view_mut::<3, 3>(3, 6).copy_from(
+            &((p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f66.transpose()
+                - dt * (p_2_5 + f36 * p_3_5 + f39 * p_4_5)),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(3, 9)
+            .copy_from(&(p_2_4 + f36 * p_3_4 + f39 * p_4_4));
+        self.covariance
+            .fixed_view_mut::<3, 3>(3, 12)
+            .copy_from(&(p_2_5 + f36 * p_3_5 + f39 * p_4_5));
+
+        // Row 3
+        self.covariance.fixed_view_mut::<3, 3>(6, 6).copy_from(
+            &((f66 * p_3_3 - dt * p_3_5.transpose()) * f66.transpose()
+                - dt * (f66 * p_3_5 - dt * p_5_5)),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(6, 9)
+            .copy_from(&(f66 * p_3_4 - dt * p_4_5.transpose()));
+        self.covariance
+            .fixed_view_mut::<3, 3>(6, 12)
+            .copy_from(&(f66 * p_3_5 - dt * p_5_5));
+
+        // Row 4 and 5 can be omitted since they are not changed..
+        // Fill elements into lower part, since covariance are symmetric.
+        self.covariance.fill_lower_triangle_with_upper_triangle();
+
+        // Add noise variance
+        let mut diagonal = self.covariance.diagonal();
+        diagonal
+            .fixed_view_mut::<3, 1>(3, 0)
+            .add_assign(self.acc_var * dt.powi(2));
+        diagonal
+            .fixed_view_mut::<3, 1>(6, 0)
+            .add_assign(self.gyr_var * dt.powi(2));
+        diagonal
+            .fixed_view_mut::<3, 1>(9, 0)
+            .add_assign(self.acc_bias_var * dt);
+        diagonal
+            .fixed_view_mut::<3, 1>(12, 0)
+            .add_assign(self.gyr_bias_var * dt);
         self.covariance.set_diagonal(&diagonal);
     }
 
@@ -337,7 +451,7 @@ impl ESKF {
     /// - `jacobian` is the measurement Jacobian matrix
     /// - `difference` is the difference between the measured and the estimated state
     /// - `variance` is the uncertainty of the observation
-    pub fn update< const R: usize>(
+    pub fn update<const R: usize>(
         &mut self,
         jacobian: SMatrix<f32, R, 15>,
         difference: SVector<f32, R>,
@@ -372,11 +486,7 @@ impl ESKF {
     /// # Arguments
     /// - `error_state` is the error state calculated by the [`ESKF::update`] function
     #[inline(never)]
-    fn update_finalize(
-        &mut self,
-        error_state: SVector<f32, 15>,
-    )  -> Result<()>
-    {
+    fn update_finalize(&mut self, error_state: SVector<f32, 15>) -> Result<()> {
         // Inject error state into nominal
         self.position += error_state.fixed_view::<3, 1>(0, 0);
         self.velocity += error_state.fixed_view::<3, 1>(3, 0);
@@ -490,7 +600,6 @@ impl ESKF {
             .copy_from(&(position - self.position));
         diff.fixed_view_mut::<3, 1>(3, 0)
             .copy_from(&(self.orientation.inverse() * orientation).scaled_axis());
-        
 
         let mut var = SMatrix::<f32, 6, 6>::zeros();
         var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
@@ -498,7 +607,7 @@ impl ESKF {
 
         self.update(jacobian, diff, var)
     }
-    
+
     /// Update the filter with an observation of the velocity
     ///
     /// # Note
@@ -529,10 +638,7 @@ impl ESKF {
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 2, 15>::zeros();
         jacobian.fixed_view_mut::<2, 2>(0, 3).fill_with_identity();
-        let diff = Vector2::new(
-            velocity.x - self.velocity.x,
-            velocity.y - self.velocity.y,
-        );
+        let diff = Vector2::new(velocity.x - self.velocity.x, velocity.y - self.velocity.y);
         self.update(jacobian, diff, velocity_var)
     }
 
