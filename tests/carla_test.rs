@@ -65,7 +65,7 @@ fn dataset1() {
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
     // Time delta is based on viewing the dataset and choosing a small value that could fit
-    filter.predict(
+    filter.predict_original(
         m.imu.acceleration,
         m.imu.rotation,
         std::time::Duration::from_millis(5).as_secs_f32(),
@@ -78,7 +78,7 @@ fn dataset1() {
         let delta = std::time::Duration::from_secs_f32(m.time - last_time);
         last_time = m.time;
 
-        filter.predict(m.imu.acceleration, m.imu.rotation, delta.as_secs_f32());
+        filter.predict_original(m.imu.acceleration, m.imu.rotation, delta.as_secs_f32());
         if let Some(position) = m.gnss.position {
             filter
                 .observe_position(position, position_variance)

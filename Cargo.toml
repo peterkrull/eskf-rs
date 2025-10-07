@@ -32,13 +32,21 @@ num-traits = { version = "0.2.19", optional = true, default-features = false, fe
     "libm",
 ] }
 
+[profile.release]
+opt-level = 3
+
 [dev-dependencies]
 approx = "0.5.0"
 nalgebra = { version = "0.34.0", features = ["serde-serialize", "debug"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 plotly = "0.6.0"
+criterion = "0.5"
 
 [[example]]
 name = "plot_carla"
 required-features = ["std"]
+
+[[bench]]
+name = "predict_benchmark"
+harness = false

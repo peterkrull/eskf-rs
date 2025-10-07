@@ -33,17 +33,24 @@
 //! // been updated. The uncertainty of the filter is also updated to reflect this new information.
 //! ```
 
+
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+/// IMU preintegration for efficient high-frequency IMU processing
+pub mod preintegrator;
+
 use core::ops::{AddAssign, SubAssign};
 
 use nalgebra::{
-    Matrix, Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector, Vector2, Vector3, U15, U5
+    Matrix, Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector, Vector2, Vector3,
+    U15, U5,
 };
 #[cfg(feature = "no_std")]
 use num_traits::float::Float;
+
+use crate::preintegrator::PreIntegrator;
 
 #[cfg(any(
     all(feature = "std", feature = "no_std"),
@@ -69,7 +76,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// Time delta as a duration, used when `std` is available
 
 /// Builder for [`ESKF`]
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Builder {
     var_acc: Vector3<f32>,
     var_rot: Vector3<f32>,
@@ -177,11 +184,12 @@ impl Builder {
             acc_bias: Vector3::zeros(),
             gyr_bias: Vector3::zeros(),
             gravity: Vector3::new(0.0, 0.0, self.gravity),
-            covariance: SMatrix::<f32, 15, 15>::identity() * self.process_covariance,
-            var_acc: self.var_acc,
-            var_gyr: self.var_rot,
-            var_acc_bias: self.var_acc_bias,
-            var_gyr_bias: self.var_rot_bias,
+            covariance: SMatrix::from_diagonal_element(self.process_covariance),
+            acc_var: self.var_acc,
+            gyr_var: self.var_rot,
+            acc_bias_var: self.var_acc_bias,
+            gyr_bias_var: self.var_rot_bias,
+            preint: PreIntegrator::new(),
         }
     }
 }
@@ -212,7 +220,7 @@ impl Default for Builder {
 /// which exposes the error state to the filter, which we can then use to correct the internal
 /// state. The uncertainty of the filter is also updated to reflect the variance of the observation
 /// and the updated state.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct ESKF {
     /// Estimated position in filter
     pub position: Point3<f32>,
@@ -229,13 +237,15 @@ pub struct ESKF {
     /// Covariance of filter state
     covariance: SMatrix<f32, 15, 15>,
     /// Acceleration variance
-    var_acc: Vector3<f32>,
+    acc_var: Vector3<f32>,
     /// Angular velocity (gyro) variance
-    var_gyr: Vector3<f32>,
+    gyr_var: Vector3<f32>,
     /// Acceleration variance bias
-    var_acc_bias: Vector3<f32>,
+    acc_bias_var: Vector3<f32>,
     /// Angular velocity (gyro) variance bias
-    var_gyr_bias: Vector3<f32>,
+    gyr_bias_var: Vector3<f32>,
+    /// Pre-integrator of IMU measurements
+    preint: PreIntegrator,
 }
 
 impl ESKF {
@@ -280,32 +290,118 @@ impl ESKF {
 
     /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
     /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
-    pub fn predict(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, delta_t: f32) {
+    ///
+    /// This is the main prediction method that uses the optimized implementation for best performance.
+    #[inline]
+    pub fn predict(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
+        self.predict_optimized(acc_meas, gyr_meas, dt)
+    }
 
+    /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
+    /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
+    ///
+    /// This is the optimized implementation that uses matrix symmetry to minimize memory operations.
+    pub fn predict_optimized(
+        &mut self,
+        acc_meas: Vector3<f32>,
+        gyr_meas: Vector3<f32>,
+        dt: f32,
+    ) {
         let rot_acc_grav = self
             .orientation
             .transform_vector(&(acc_meas - self.acc_bias))
             + self.gravity;
-        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * delta_t);
+        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
         let orient_mat = self.orientation.to_rotation_matrix().into_inner();
         // Update internal state kinematics
-        self.position += self.velocity * delta_t + 0.5 * rot_acc_grav * delta_t.powi(2);
-        self.velocity += rot_acc_grav * delta_t;
+        self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
+        self.velocity += rot_acc_grav * dt;
+        self.orientation *= norm_rot;
+
+        // Block-entries of error jacobian and their transposes
+        let f36 = -orient_mat * skew(&(acc_meas - self.acc_bias)) * dt;
+        let f39 = -orient_mat * dt;
+        let f66 = norm_rot.to_rotation_matrix().into_inner().transpose();
+
+        // Extract the 15 upper-triangle blocks from the current covariance matrix P
+        let p_1_1 = self.covariance.fixed_view::<3, 3>(0, 0).clone_owned();
+        let p_1_2 = self.covariance.fixed_view::<3, 3>(0, 3).clone_owned();
+        let p_1_3 = self.covariance.fixed_view::<3, 3>(0, 6).clone_owned();
+        let p_1_4 = self.covariance.fixed_view::<3, 3>(0, 9).clone_owned();
+        let p_1_5 = self.covariance.fixed_view::<3, 3>(0, 12).clone_owned();
+
+        let p_2_2 = self.covariance.fixed_view::<3, 3>(3, 3).clone_owned();
+        let p_2_3 = self.covariance.fixed_view::<3, 3>(3, 6).clone_owned();
+        let p_2_4 = self.covariance.fixed_view::<3, 3>(3, 9).clone_owned();
+        let p_2_5 = self.covariance.fixed_view::<3, 3>(3, 12).clone_owned();
+
+        let p_3_3 = self.covariance.fixed_view::<3, 3>(6, 6).clone_owned();
+        let p_3_4 = self.covariance.fixed_view::<3, 3>(6, 9).clone_owned();
+        let p_3_5 = self.covariance.fixed_view::<3, 3>(6, 12).clone_owned();
+
+        let p_4_4 = self.covariance.fixed_view::<3, 3>(9, 9).clone_owned();
+        let p_4_5 = self.covariance.fixed_view::<3, 3>(9, 12).clone_owned();
+
+        let p_5_5 = self.covariance.fixed_view::<3, 3>(12, 12).clone_owned();
+
+        // Row 1
+        self.covariance.fixed_view_mut::<3, 3>(0, 0).copy_from(&(p_1_1 + dt * (p_1_2.transpose() + p_1_2 + dt * p_2_2)));
+        self.covariance.fixed_view_mut::<3, 3>(0, 3).copy_from(&(p_1_2 + dt * p_2_2 + (p_1_3 + dt * p_2_3) * f36.transpose() + (p_1_4 + dt * p_2_4) * f39.transpose()));
+        self.covariance.fixed_view_mut::<3, 3>(0, 6).copy_from(&((p_1_3 + dt * p_2_3) * f66.transpose() - dt * (p_1_5 + dt * p_2_5)));
+        self.covariance.fixed_view_mut::<3, 3>(0, 9).copy_from(&(p_1_4 + dt * p_2_4));
+        self.covariance.fixed_view_mut::<3, 3>(0, 12).copy_from(&(p_1_5 + dt * p_2_5));
+
+        // Row 2
+        self.covariance.fixed_view_mut::<3, 3>(3, 3).copy_from(&(p_2_2 + f36 * p_2_3.transpose() + f39 * p_2_4.transpose() + (p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f36.transpose() + (p_2_4 + f36 * p_3_4 + f39 * p_4_4) * f39.transpose()));
+        self.covariance.fixed_view_mut::<3, 3>(3, 6).copy_from(&((p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f66.transpose() - dt * (p_2_5 + f36 * p_3_5 + f39 * p_4_5)),);
+        self.covariance.fixed_view_mut::<3, 3>(3, 9).copy_from(&(p_2_4 + f36 * p_3_4 + f39 * p_4_4));
+        self.covariance.fixed_view_mut::<3, 3>(3, 12).copy_from(&(p_2_5 + f36 * p_3_5 + f39 * p_4_5));
+
+        // Row 3
+        self.covariance.fixed_view_mut::<3, 3>(6, 6).copy_from(&((f66 * p_3_3 - dt * p_3_5.transpose()) * f66.transpose() - dt * (f66 * p_3_5 - dt * p_5_5)));
+        self.covariance.fixed_view_mut::<3, 3>(6, 9).copy_from(&(f66 * p_3_4 - dt * p_4_5.transpose()));
+        self.covariance.fixed_view_mut::<3, 3>(6, 12).copy_from(&(f66 * p_3_5 - dt * p_5_5));
+
+        // Row 4 and 5 can be omitted since they are not changed..
+        // Fill elements into lower part, since covariance are symmetric.
+        self.covariance.fill_lower_triangle_with_upper_triangle();
+
+        // Add noise variance
+        let mut diagonal = self.covariance.diagonal();
+        diagonal.fixed_view_mut::<3, 1>(3, 0).add_assign(self.acc_var * dt.powi(2));
+        diagonal.fixed_view_mut::<3, 1>(6, 0).add_assign(self.gyr_var * dt.powi(2));
+        diagonal.fixed_view_mut::<3, 1>(9, 0).add_assign(self.acc_bias_var * dt);
+        diagonal.fixed_view_mut::<3, 1>(12, 0).add_assign(self.gyr_bias_var * dt);
+        self.covariance.set_diagonal(&diagonal);
+    }
+
+    /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
+    /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
+    pub fn predict_original(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
+        let rot_acc_grav = self
+            .orientation
+            .transform_vector(&(acc_meas - self.acc_bias))
+            + self.gravity;
+        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
+        let orient_mat = self.orientation.to_rotation_matrix().into_inner();
+        // Update internal state kinematics
+        self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
+        self.velocity += rot_acc_grav * dt;
         self.orientation *= norm_rot;
 
         // Propagate uncertainty, since we have not observed any new information about the state of
         // the filter we need to update our estimate of the uncertainty of the filer
-        let ident_delta = Matrix3::<f32>::identity() * delta_t;
+        let ident_delta = Matrix3::<f32>::identity() * dt;
         let mut error_jacobian = SMatrix::<f32, 15, 15>::identity();
         error_jacobian
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&ident_delta);
         error_jacobian
             .fixed_view_mut::<3, 3>(3, 6)
-            .copy_from(&(-orient_mat * skew(&(acc_meas - self.acc_bias)) * delta_t));
+            .copy_from(&(-orient_mat * skew(&(acc_meas - self.acc_bias)) * dt));
         error_jacobian
             .fixed_view_mut::<3, 3>(3, 9)
-            .copy_from(&(-orient_mat * delta_t));
+            .copy_from(&(-orient_mat * dt));
         error_jacobian
             .fixed_view_mut::<3, 3>(6, 6)
             .copy_from(&norm_rot.to_rotation_matrix().into_inner().transpose());
@@ -318,17 +414,294 @@ impl ESKF {
         let mut diagonal = self.covariance.diagonal();
         diagonal
             .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.var_acc * delta_t.powi(2));
+            .add_assign(self.acc_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.var_gyr * delta_t.powi(2));
+            .add_assign(self.gyr_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.var_acc_bias * delta_t);
+            .add_assign(self.acc_bias_var * dt);
         diagonal
             .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.var_gyr_bias * delta_t);
+            .add_assign(self.gyr_bias_var * dt);
         self.covariance.set_diagonal(&diagonal);
+    }
+
+    /// Integrate an IMU measurement into a preintegrator without updating the filter state.
+    ///
+    /// This is a lightweight operation that accumulates IMU measurements for later application
+    /// to the filter. This is useful when IMU measurements arrive at high frequency (e.g., 1000 Hz)
+    /// but you only want to update the filter at a lower rate (e.g., 100 Hz).
+    ///
+    /// # Arguments
+    /// - `preintegrator`: Mutable reference to the preintegrator to accumulate into
+    /// - `acc_meas`: Measured acceleration from accelerometer (m/s²)
+    /// - `gyr_meas`: Measured angular velocity from gyroscope (rad/s)
+    /// - `dt`: Time step since last measurement (seconds)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut filter = eskf::Builder::new().build();
+    /// let mut preint = eskf::preintegrator::ImuPreintegration::new();
+    ///
+    /// // Accumulate 10 high-frequency IMU measurements
+    /// for _ in 0..10 {
+    ///     filter.integrate(&mut preint, acc_reading, gyr_reading, 0.001);
+    /// }
+    ///
+    /// // Apply all accumulated measurements in one efficient prediction step
+    /// filter.predict_preintegrated(&preint);
+    ///
+    /// // Reset for next period
+    /// preint.reset();
+    /// ```
+    pub fn integrate(
+        &mut self,
+        acc_meas: Vector3<f32>,
+        gyr_meas: Vector3<f32>,
+        dt: f32,
+    ) {
+        self.preint.integrate(acc_meas, gyr_meas, self.acc_bias, self.gyr_bias, self.acc_var, self.gyr_var, dt);
+    }
+
+    /// Apply preintegrated IMU measurements to update the filter state and covariance.
+    ///
+    /// This method applies all accumulated IMU measurements from the preintegrator in a single
+    /// efficient prediction step. After calling this, the preintegrator is reset.
+    /// This should be called at a lower frequency than `integrate` (e.g., 100 Hz).
+    pub fn predict_int(&mut self) {
+        if self.preint.is_empty() {
+            return;
+        }
+
+        let dt = self.preint.delta_time;
+        let rot_mat = self.orientation.to_rotation_matrix().into_inner();
+        let delta_rot_mat = self.preint.delta_orientation.to_rotation_matrix().into_inner();
+
+        // --- 1. Update Nominal State ---
+        self.position += self.velocity * dt + 0.5 * self.gravity * dt.powi(2) + rot_mat * self.preint.delta_position;
+        self.velocity += self.gravity * dt + rot_mat * self.preint.delta_velocity;
+        self.orientation *= self.preint.delta_orientation;
+
+        // --- 2. Propagate ESKF Covariance ---
+        // Build the 15x15 error-state transition matrix Fx and the 15x9 noise jacobian Fn
+
+        let mut fx = SMatrix::<f32, 15, 15>::identity();
+        // d(p_j)/d(v_i)
+        fx.fixed_view_mut::<3, 3>(0, 3).copy_from(&(Matrix3::identity() * dt));
+        // d(p_j)/d(theta_i)
+        fx.fixed_view_mut::<3, 3>(0, 6).copy_from(&(-rot_mat * skew(&self.preint.delta_position)));
+        // d(v_j)/d(theta_i)
+        fx.fixed_view_mut::<3, 3>(3, 6).copy_from(&(-rot_mat * skew(&self.preint.delta_velocity)));
+        // d(theta_j)/d(theta_i)
+        fx.fixed_view_mut::<3, 3>(6, 6).copy_from(&delta_rot_mat.transpose());
+
+        // Incorporate bias jacobians
+        let j = &self.preint.jacobian;
+        // Order of preint jacobian is [theta, vel, pos] w.r.t [ba, bg]
+        // Order of ESKF state is [pos, vel, theta, ba, bg]
+        let j_pos_ba = j.fixed_view::<3, 3>(6, 0);
+        let j_pos_bg = j.fixed_view::<3, 3>(6, 3);
+        let j_vel_ba = j.fixed_view::<3, 3>(3, 0);
+        let j_vel_bg = j.fixed_view::<3, 3>(3, 3);
+        let j_theta_bg = j.fixed_view::<3, 3>(0, 3);
+
+        // d(p_j)/d(ba_i)
+        fx.fixed_view_mut::<3, 3>(0, 9).copy_from(&(rot_mat * j_pos_ba));
+        // d(p_j)/d(bg_i)
+        fx.fixed_view_mut::<3, 3>(0, 12).copy_from(&(rot_mat * j_pos_bg));
+        // d(v_j)/d(ba_i)
+        fx.fixed_view_mut::<3, 3>(3, 9).copy_from(&(rot_mat * j_vel_ba));
+        // d(v_j)/d(bg_i)
+        fx.fixed_view_mut::<3, 3>(3, 12).copy_from(&(rot_mat * j_vel_bg));
+        // d(theta_j)/d(bg_i)
+        fx.fixed_view_mut::<3, 3>(6, 12).copy_from(&j_theta_bg);
+
+        // Noise jacobian (maps preintegrated noise to main error state)
+        let mut fn_mat = SMatrix::<f32, 15, 9>::zeros();
+        // Order of preint covariance is [theta, vel, pos]
+        fn_mat.fixed_view_mut::<3, 3>(6, 0).copy_from(&Matrix3::identity()); // d(theta_j)/d(noise_theta)
+        fn_mat.fixed_view_mut::<3, 3>(3, 3).copy_from(&rot_mat); // d(v_j)/d(noise_vel)
+        fn_mat.fixed_view_mut::<3, 3>(0, 6).copy_from(&rot_mat); // d(p_j)/d(noise_pos)
+
+        // Bias random walk noise covariance
+        let mut q_bias = SMatrix::<f32, 15, 15>::zeros();
+        q_bias.fixed_view_mut::<3, 3>(9, 9).copy_from(&Matrix3::from_diagonal(&self.acc_bias_var.map(|e| e * dt)));
+        q_bias.fixed_view_mut::<3, 3>(12, 12).copy_from(&Matrix3::from_diagonal(&self.gyr_bias_var.map(|e| e * dt)));
+
+        // Propagate full covariance: P_new = Fx * P * Fx' + Fn * Sigma_preint * Fn' + Q_bias
+        self.covariance = fx * self.covariance * fx.transpose() + fn_mat * self.preint.covariance * fn_mat.transpose() + q_bias;
+
+        // --- 3. Reset Preintegrator ---
+        self.preint.reset();
+    }
+
+    /// Apply preintegrated IMU measurements to update the filter state and covariance.
+    ///
+    /// This method applies all accumulated IMU measurements from a preintegrator in a single
+    /// efficient prediction step. It uses the same covariance propagation as `predict_optimized_tr`
+    /// but works with the accumulated deltas from the preintegrator.
+    ///
+    /// # Arguments
+    /// - `preintegrator`: Reference to the preintegrator containing accumulated measurements
+    ///
+    /// # Note
+    /// After calling this method, you should call `preintegrator.reset()` to start a new
+    /// integration period.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut filter = eskf::Builder::new().build();
+    ///
+    /// // Integration loop (high frequency, e.g., 1000 Hz)
+    /// for _ in 0..10 {
+    ///     filter.integrate(acc_reading, gyr_reading, 0.001);
+    /// }
+    ///
+    /// // Prediction step (lower frequency, e.g., 100 Hz)
+    /// filter.predict_preintegrated();
+    /// ```
+    pub fn predict_preintegrated(
+        &mut self,
+    ) {
+        // Don't update if nothing has been integrated
+        if self.preint.is_empty() {
+            return;
+        }
+
+        let dt = self.preint.delta_time;
+
+        // Transform preintegrated velocity from body frame to global frame
+        let delta_vel_global = self
+            .orientation
+            .transform_vector(&self.preint.delta_velocity);
+
+        // Transform preintegrated position from body frame to global frame
+        let delta_pos_global = self
+            .orientation
+            .transform_vector(&self.preint.delta_position);
+
+        // Update nominal state with preintegrated values
+        self.position += delta_pos_global + self.velocity * dt + 0.5 * self.gravity * dt.powi(2);
+        self.velocity += delta_vel_global + self.gravity * dt;
+        self.orientation *= self.preint.delta_orientation;
+
+        // For covariance propagation, we need the average orientation and acceleration
+        // Since we don't store these in the preintegrator, we use an approximation
+        // based on the integrated rotation
+        
+        // Approximate the Jacobian blocks using the midpoint rotation
+        // This is an approximation since we don't store the full trajectory
+        let midpoint_orientation = self.orientation
+            * UnitQuaternion::from_scaled_axis(
+                -0.5 * self.preint.delta_orientation.scaled_axis(),
+            );
+        let midpoint_mat = midpoint_orientation.to_rotation_matrix().into_inner();
+
+        // Approximate average acceleration from integrated velocity
+        let avg_acc = self.preint.delta_velocity / dt;
+
+        let f36 = -midpoint_mat * skew(&avg_acc) * dt;
+        let f39 = -midpoint_mat * dt;
+        let f66 = self.preint
+            .delta_orientation
+            .to_rotation_matrix()
+            .into_inner()
+            .transpose();
+
+        // Extract necessary covariance blocks (using symmetry)
+        let p_1_1 = self.covariance.fixed_view::<3, 3>(0, 0).clone_owned();
+        let p_1_2 = self.covariance.fixed_view::<3, 3>(0, 3).clone_owned();
+        let p_1_3 = self.covariance.fixed_view::<3, 3>(0, 6).clone_owned();
+        let p_1_4 = self.covariance.fixed_view::<3, 3>(0, 9).clone_owned();
+        let p_1_5 = self.covariance.fixed_view::<3, 3>(0, 12).clone_owned();
+
+        let p_2_2 = self.covariance.fixed_view::<3, 3>(3, 3).clone_owned();
+        let p_2_3 = self.covariance.fixed_view::<3, 3>(3, 6).clone_owned();
+        let p_2_4 = self.covariance.fixed_view::<3, 3>(3, 9).clone_owned();
+        let p_2_5 = self.covariance.fixed_view::<3, 3>(3, 12).clone_owned();
+
+        let p_3_2 = self.covariance.fixed_view::<3, 3>(6, 3).clone_owned();
+        let p_3_3 = self.covariance.fixed_view::<3, 3>(6, 6).clone_owned();
+        let p_3_4 = self.covariance.fixed_view::<3, 3>(6, 9).clone_owned();
+        let p_3_5 = self.covariance.fixed_view::<3, 3>(6, 12).clone_owned();
+
+        let p_4_4 = self.covariance.fixed_view::<3, 3>(9, 9).clone_owned();
+        let p_4_5 = self.covariance.fixed_view::<3, 3>(9, 12).clone_owned();
+
+        let p_5_5 = self.covariance.fixed_view::<3, 3>(12, 12).clone_owned();
+
+        // Update covariance blocks (same structure as predict_optimized_tr)
+        // Row 1
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(p_1_1 + dt * (p_1_2.transpose() + p_1_2 + dt * p_2_2)));
+        self.covariance.fixed_view_mut::<3, 3>(0, 3).copy_from(
+            &(p_1_2 + dt * p_2_2
+                + (p_1_3 + dt * p_2_3) * f36.transpose()
+                + (p_1_4 + dt * p_2_4) * f39.transpose()),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 6)
+            .copy_from(&((p_1_3 + dt * p_2_3) * f66.transpose() - dt * (p_1_5 + dt * p_2_5)));
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 9)
+            .copy_from(&(p_1_4 + dt * p_2_4));
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 12)
+            .copy_from(&(p_1_5 + dt * p_2_5));
+
+        // Row 2
+        self.covariance.fixed_view_mut::<3, 3>(3, 3).copy_from(
+            &(p_2_2
+                + f36 * p_3_2
+                + f39 * p_2_4.transpose()
+                + (p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f36.transpose()
+                + (p_2_4 + f36 * p_3_4 + f39 * p_4_4) * f39.transpose()),
+        );
+        self.covariance.fixed_view_mut::<3, 3>(3, 6).copy_from(
+            &((p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f66.transpose()
+                - dt * (p_2_5 + f36 * p_3_5 + f39 * p_4_5)),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(3, 9)
+            .copy_from(&(p_2_4 + f36 * p_3_4 + f39 * p_4_4));
+        self.covariance
+            .fixed_view_mut::<3, 3>(3, 12)
+            .copy_from(&(p_2_5 + f36 * p_3_5 + f39 * p_4_5));
+
+        // Row 3
+        self.covariance.fixed_view_mut::<3, 3>(6, 6).copy_from(
+            &((f66 * p_3_3 - dt * p_3_5.transpose()) * f66.transpose()
+                - dt * (f66 * p_3_5 - dt * p_5_5)),
+        );
+        self.covariance
+            .fixed_view_mut::<3, 3>(6, 9)
+            .copy_from(&(f66 * p_3_4 - dt * p_4_5.transpose()));
+        self.covariance
+            .fixed_view_mut::<3, 3>(6, 12)
+            .copy_from(&(f66 * p_3_5 - dt * p_5_5));
+
+        // Fill lower triangle
+        self.covariance.fill_lower_triangle_with_upper_triangle();
+
+        // Add accumulated noise variance
+        let mut diagonal = self.covariance.diagonal();
+        diagonal
+            .fixed_view_mut::<3, 1>(3, 0)
+            .add_assign(self.acc_var * dt.powi(2));
+        diagonal
+            .fixed_view_mut::<3, 1>(6, 0)
+            .add_assign(self.gyr_var * dt.powi(2));
+        diagonal
+            .fixed_view_mut::<3, 1>(9, 0)
+            .add_assign(self.acc_bias_var * dt);
+        diagonal
+            .fixed_view_mut::<3, 1>(12, 0)
+            .add_assign(self.gyr_bias_var * dt);
+        self.covariance.set_diagonal(&diagonal);
+
+        self.preint.reset()
     }
 
     /// Update the filter with a generic observation
@@ -337,7 +710,7 @@ impl ESKF {
     /// - `jacobian` is the measurement Jacobian matrix
     /// - `difference` is the difference between the measured and the estimated state
     /// - `variance` is the uncertainty of the observation
-    pub fn update< const R: usize>(
+    pub fn update<const R: usize>(
         &mut self,
         jacobian: SMatrix<f32, R, 15>,
         difference: SVector<f32, R>,
@@ -350,6 +723,7 @@ impl ESKF {
                 .try_inverse()
                 .ok_or(Error::InversionError)?;
         let error_state = &kalman_gain * difference;
+
         // Update the covariance based on the observed filter state
         if cfg!(feature = "cov-symmetric") {
             self.covariance -= &kalman_gain
@@ -372,11 +746,7 @@ impl ESKF {
     /// # Arguments
     /// - `error_state` is the error state calculated by the [`ESKF::update`] function
     #[inline(never)]
-    fn update_finalize(
-        &mut self,
-        error_state: SVector<f32, 15>,
-    )  -> Result<()>
-    {
+    fn update_finalize(&mut self, error_state: SVector<f32, 15>) -> Result<()> {
         // Inject error state into nominal
         self.position += error_state.fixed_view::<3, 1>(0, 0);
         self.velocity += error_state.fixed_view::<3, 1>(3, 0);
@@ -490,7 +860,6 @@ impl ESKF {
             .copy_from(&(position - self.position));
         diff.fixed_view_mut::<3, 1>(3, 0)
             .copy_from(&(self.orientation.inverse() * orientation).scaled_axis());
-        
 
         let mut var = SMatrix::<f32, 6, 6>::zeros();
         var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
@@ -498,7 +867,7 @@ impl ESKF {
 
         self.update(jacobian, diff, var)
     }
-    
+
     /// Update the filter with an observation of the velocity
     ///
     /// # Note
@@ -529,10 +898,7 @@ impl ESKF {
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 2, 15>::zeros();
         jacobian.fixed_view_mut::<2, 2>(0, 3).fill_with_identity();
-        let diff = Vector2::new(
-            velocity.x - self.velocity.x,
-            velocity.y - self.velocity.y,
-        );
+        let diff = Vector2::new(velocity.x - self.velocity.x, velocity.y - self.velocity.y);
         self.update(jacobian, diff, velocity_var)
     }
 
@@ -576,7 +942,7 @@ mod test {
     fn linear_motion() {
         let mut filter = Builder::new().build();
         // Some initial motion to move the filter
-        filter.predict(
+        filter.predict_original(
             Vector3::new(1.0, 0.0, -9.81),
             Vector3::zeros(),
             Duration::from_millis(1000).as_secs_f32(),
@@ -586,7 +952,7 @@ mod test {
         // There should be no orientation change from the above motion
         assert_relative_eq!(filter.orientation, UnitQuaternion::identity());
         // Acceleration has stopped, but there will still be inertia in the filter
-        filter.predict(
+        filter.predict_original(
             Vector3::new(0.0, 0.0, -9.81),
             Vector3::zeros(),
             Duration::from_millis(500).as_secs_f32(),
@@ -594,7 +960,7 @@ mod test {
         assert_relative_eq!(filter.position, Point3::new(1.0, 0.0, 0.0));
         assert_relative_eq!(filter.velocity, Vector3::new(1.0, 0.0, 0.0));
         assert_relative_eq!(filter.orientation, UnitQuaternion::identity());
-        filter.predict(
+        filter.predict_original(
             Vector3::new(-1.0, -1.0, -9.81),
             Vector3::zeros(),
             Duration::from_millis(1000).as_secs_f32(),
@@ -608,7 +974,7 @@ mod test {
     fn rotational_motion() {
         let mut filter = Builder::new().build();
         // Note that this motion is a free fall rotation
-        filter.predict(
+        filter.predict_original(
             Vector3::zeros(),
             Vector3::new(FRAC_PI_2, 0.0, 0.0),
             Duration::from_millis(1000).as_secs_f32(),
@@ -617,7 +983,7 @@ mod test {
             filter.orientation,
             UnitQuaternion::from_euler_angles(FRAC_PI_2, 0.0, 0.0)
         );
-        filter.predict(
+        filter.predict_original(
             Vector3::zeros(),
             Vector3::new(-FRAC_PI_2, 0.0, 0.0),
             Duration::from_millis(1000).as_secs_f32(),
@@ -629,7 +995,7 @@ mod test {
         // We reset the filter here so that the following equalities are not affected by existing
         // motion in the filter
         let mut filter = Builder::new().build();
-        filter.predict(
+        filter.predict_original(
             Vector3::zeros(),
             Vector3::new(0.0, -FRAC_PI_2, 0.0),
             Duration::from_millis(1000).as_secs_f32(),
