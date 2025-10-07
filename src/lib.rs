@@ -13,15 +13,14 @@
 //! ```
 //! use eskf;
 //! use nalgebra::{Vector3, Point3};
-//! use std::time::Duration;
 //!
 //! // Create a default filter, modelling a perfect IMU without drift
 //! let mut filter = eskf::Builder::new().build();
 //! // Read measurements from IMU
 //! let imu_acceleration = Vector3::new(0.0, 0.0, -9.81);
 //! let imu_rotation = Vector3::zeros();
-//! // Tell the filter what we just measured
-//! filter.predict(imu_acceleration, imu_rotation, Duration::from_millis(1000));
+//! // Tell the filter what we just measured (at 10 Hz => 0.1 sec)
+//! filter.predict(imu_acceleration, imu_rotation, 0.1);
 //! // Check the new state of the filter
 //! // filter.position or filter.velocity...
 //! // ...
@@ -365,14 +364,15 @@ impl ESKF {
                 (SMatrix::<f32, 15, 15>::identity() - &kalman_gain * &jacobian) * self.covariance;
         }
 
-        self.update_the_sequel(error_state)
+        self.update_finalize(error_state)
     }
 
-    /// Update the filter with a generic observation
+    /// Outlined finalization of [`ESKF::update`] function to reduce monomorphization impact.
     ///
     /// # Arguments
     /// - `error_state` is the error state calculated by the [`ESKF::update`] function
-    fn update_the_sequel(
+    #[inline(never)]
+    fn update_finalize(
         &mut self,
         error_state: SVector<f32, 15>,
     )  -> Result<()>
@@ -455,24 +455,50 @@ impl ESKF {
     /// Update the filter with an observation of the position
     pub fn observe_position(
         &mut self,
-        measurement: Point3<f32>,
-        variance: Matrix3<f32>,
+        position: Point3<f32>,
+        position_var: Matrix3<f32>,
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
         jacobian.fixed_view_mut::<3, 3>(0, 0).fill_with_identity();
-        let diff = measurement - self.position;
-        self.update(jacobian, diff, variance)
+        let diff = position - self.position;
+        self.update(jacobian, diff, position_var)
     }
 
     /// Update the filter with an observation of the height alone
-    pub fn observe_height(&mut self, measured: f32, variance: f32) -> Result<()> {
+    pub fn observe_height(&mut self, height: f32, height_var: f32) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 1, 15>::zeros();
         jacobian.fixed_view_mut::<1, 1>(0, 2).fill_with_identity();
-        let diff = SVector::<f32, 1>::new(measured - self.position.z);
-        let var = SMatrix::<f32, 1, 1>::new(variance);
+        let diff = SVector::<f32, 1>::new(height - self.position.z);
+        let var = SMatrix::<f32, 1, 1>::new(height_var);
         self.update(jacobian, diff, var)
     }
 
+    /// Update the filter with an observation of the position and orientation
+    pub fn observe_position_orientation(
+        &mut self,
+        position: Point3<f32>,
+        position_var: Matrix3<f32>,
+        orientation: UnitQuaternion<f32>,
+        orientation_var: Matrix3<f32>,
+    ) -> Result<()> {
+        let mut jacobian = SMatrix::<f32, 6, 15>::zeros();
+        jacobian.fixed_view_mut::<3, 3>(0, 0).fill_with_identity();
+        jacobian.fixed_view_mut::<3, 3>(3, 6).fill_with_identity();
+
+        let mut diff = SVector::<f32, 6>::zeros();
+        diff.fixed_view_mut::<3, 1>(0, 0)
+            .copy_from(&(position - self.position));
+        diff.fixed_view_mut::<3, 1>(3, 0)
+            .copy_from(&(self.orientation.inverse() * orientation).scaled_axis());
+        
+
+        let mut var = SMatrix::<f32, 6, 6>::zeros();
+        var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
+        var.fixed_view_mut::<3, 3>(3, 3).copy_from(&orientation_var);
+
+        self.update(jacobian, diff, var)
+    }
+    
     /// Update the filter with an observation of the velocity
     ///
     /// # Note
@@ -481,13 +507,13 @@ impl ESKF {
     /// the filter, e.g. `filter.orientation.transform_vector(&relative_measurement)`.
     pub fn observe_velocity(
         &mut self,
-        measurement: Vector3<f32>,
-        variance: Matrix3<f32>,
+        velocity: Vector3<f32>,
+        velocity_var: Matrix3<f32>,
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
         jacobian.fixed_view_mut::<3, 3>(0, 3).fill_with_identity();
-        let diff = measurement - self.velocity;
-        self.update(jacobian, diff, variance)
+        let diff = velocity - self.velocity;
+        self.update(jacobian, diff, velocity_var)
     }
 
     /// Update the filter with an observation of the velocity in only the `[X, Y]` axis
@@ -498,28 +524,28 @@ impl ESKF {
     /// the filter, e.g. `filter.orientation.transform_vector(&relative_measurement)`.
     pub fn observe_velocity2d(
         &mut self,
-        measurement: Vector2<f32>,
-        variance: Matrix2<f32>,
+        velocity: Vector2<f32>,
+        velocity_var: Matrix2<f32>,
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 2, 15>::zeros();
         jacobian.fixed_view_mut::<2, 2>(0, 3).fill_with_identity();
         let diff = Vector2::new(
-            measurement.x - self.velocity.x,
-            measurement.y - self.velocity.y,
+            velocity.x - self.velocity.x,
+            velocity.y - self.velocity.y,
         );
-        self.update(jacobian, diff, variance)
+        self.update(jacobian, diff, velocity_var)
     }
 
     /// Update the filter with an observation of the orientation
     pub fn observe_orientation(
         &mut self,
-        measurement: UnitQuaternion<f32>,
-        variance: Matrix3<f32>,
+        orientation: UnitQuaternion<f32>,
+        orientation_var: Matrix3<f32>,
     ) -> Result<()> {
         let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
         jacobian.fixed_view_mut::<3, 3>(0, 6).fill_with_identity();
-        let diff = measurement * self.orientation;
-        self.update(jacobian, diff.scaled_axis(), variance)
+        let diff = (self.orientation.inverse() * orientation).scaled_axis();
+        self.update(jacobian, diff, orientation_var)
     }
 }
 
