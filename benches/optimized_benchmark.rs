@@ -1,20 +1,19 @@
-use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
-use eskf::{Builder, ESKF};
+use eskf::ESKF;
 use nalgebra::Vector3;
+use std::hint::black_box;
 
 fn benchmark_predict(
     c: &mut Criterion,
     predict: fn(&mut ESKF, Vector3<f32>, Vector3<f32>, f32),
     id: &'static str,
 ) {
-    let mut filter = Builder::new()
-        .acceleration_variance(0.01)
-        .rotation_variance(0.001)
-        .acceleration_bias(0.0001)
-        .rotation_bias(0.0001)
-        .initial_covariance(1e-6)
-        .build();
+    let mut filter = ESKF::new()
+        .with_acc_noise_density(0.01)
+        .with_gyr_noise_density(0.001)
+        .with_acc_random_walk(0.0001)
+        .with_gyr_random_walk(0.0001)
+        .with_covariance_diagonal(1e-6);
 
     let acc = Vector3::new(0.1, 0.2, -9.81);
     let gyr = Vector3::new(0.01, -0.02, 0.005);
@@ -33,10 +32,6 @@ fn predict_optimized(c: &mut Criterion) {
     benchmark_predict(c, ESKF::predict_optimized, "predict_optimized")
 }
 
-criterion_group!(
-    benches,
-    predict_original,
-    predict_optimized,
-);
+criterion_group!(benches, predict_original, predict_optimized,);
 
 criterion_main!(benches);

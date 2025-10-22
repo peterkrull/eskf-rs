@@ -122,8 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut plot_vel = PlotRow::default();
     // Create filter based on dataset
     let mut filter = eskf::Builder::new()
-        .acceleration_variance(dataset.variance.imu_acceleration)
-        .rotation_variance(dataset.variance.imu_rotation)
+        .acc_noise_density(dataset.variance.imu_acceleration)
+        .gyr_noise_density(dataset.variance.imu_rotation)
         .initial_covariance(1e-1)
         .build();
     // Insert a first measurement into the filter
@@ -156,13 +156,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             i as f32,
             &filter.position.coords,
             &m.ground_truth.position.coords,
-            &filter.position_uncertainty(),
+            &filter.position_variance(),
         );
         plot_vel.add(
             i as f32,
             &filter.velocity,
             &m.ground_truth.velocity,
-            &filter.velocity_uncertainty(),
+            &filter.velocity_variance(),
         );
     }
     let duration = time_now.elapsed();

@@ -16,6 +16,7 @@ struct Variance {
 
 #[derive(Deserialize, Debug)]
 struct GroundTruth {
+    #[allow(unused)]
     acceleration: Vector3<f32>,
     velocity: Vector3<f32>,
     position: Point3<f32>,
@@ -55,13 +56,12 @@ fn dataset1() {
     let reader = BufReader::new(file);
     let dataset: Dataset = serde_json::from_reader(reader).expect("Could not parse JSON");
     let position_variance =
-        eskf::ESKF::variance_from_element(dataset.variance.gnss_position.sqrt());
+        nalgebra::Matrix3::from_diagonal_element(dataset.variance.gnss_position.sqrt());
     // Create filter based on dataset
-    let mut filter = eskf::Builder::new()
-        .acceleration_variance(dataset.variance.imu_acceleration)
-        .rotation_variance(dataset.variance.imu_rotation)
-        .initial_covariance(1e-1)
-        .build();
+    let mut filter = eskf::ESKF::new()
+        .with_acc_noise_density(dataset.variance.imu_acceleration)
+        .with_gyr_noise_density(dataset.variance.imu_rotation)
+        .with_covariance_diagonal(1e-1);
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
     // Time delta is based on viewing the dataset and choosing a small value that could fit
@@ -93,17 +93,17 @@ fn dataset1() {
         assert_relative_eq!(
             filter.position,
             m.ground_truth.position,
-            epsilon = filter.position_uncertainty().norm()
+            epsilon = filter.position_variance().norm()
         );
         assert_relative_eq!(
             filter.velocity,
             m.ground_truth.velocity,
-            epsilon = filter.velocity_uncertainty().norm()
+            epsilon = filter.velocity_variance().norm()
         );
         assert_relative_eq!(
-            filter.orientation,
+            filter.rotation,
             gt_orient,
-            epsilon = filter.orientation_uncertainty().norm()
+            epsilon = filter.rotation_variance().norm()
         );
     }
 }

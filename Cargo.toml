@@ -1,28 +1,26 @@
 [package]
 name = "eskf"
 version = "0.4.0"
-authors = ["Jørgen Nordmoen <jorgen@nordmoen.net>"]
+authors = ["Jørgen Nordmoen <jorgen@nordmoen.net>", "Peter Krull <peterkrullpeter@gmail.com>"]
 description = "Navigation filter based on an Error State Kalman Filter (ESKF)"
-keywords = ["navigation", "filter", "orientation", "kalman"]
+keywords = ["navigation", "filter", "attitude", "kalman"]
 license = "MIT OR Apache-2.0"
 categories = ["embedded", "no-std", "mathematics", "science::robotics"]
-edition = "2018"
+edition = "2024"
 readme = "README.md"
-homepage = "https://github.com/nordmoen/eskf-rs"
-repository = "https://github.com/nordmoen/eskf-rs"
+homepage = "https://github.com/peterkrull/eskf-rs"
+repository = "https://github.com/peterkrull/eskf-rs"
 documentation = "https://docs.rs/eskf"
 exclude = ["docs/*"]
 
 [features]
-default = ["std", "full-reset"]
+default = ["full-reset"]
 # Perform a full filter reset during measurement update
 full-reset = []
 # A more stable covariance update, but more computationally expensive
 cov-symmetric = []
 # Stable, symmetric and positive covariance update, computationally expensive
 cov-joseph = []
-# Use Rust 'std', disable and enable 'no_std' to use in no_std enviroment
-std = ["nalgebra/std"]
 # Enable to use in no_std environment
 no_std = ["nalgebra/libm", "dep:num-traits"]
 
