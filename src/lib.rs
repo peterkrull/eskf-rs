@@ -16,9 +16,16 @@
 
 use core::ops::{AddAssign, SubAssign};
 
+#[cfg(feature = "nalgebra_34_1")]
+use nalgebra_34_1 as nalgebra;
+
+#[cfg(feature = "nalgebra_34_0")]
+use nalgebra_34_0 as nalgebra;
+
 use nalgebra::{Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
+
 #[cfg(feature = "no_std")]
-use num_traits::float::Float;
+use num_traits::float::Float as _;
 
 /// Potential errors raised during operations
 #[derive(Copy, Clone, Debug)]
@@ -65,14 +72,14 @@ pub struct ESKF {
     pub gravity: Vector3<f32>,
     /// Covariance of filter state
     covariance: SMatrix<f32, 15, 15>,
-    /// Accelerometer variance
-    acc_psd: Vector3<f32>,
-    /// Gyroscope variance
-    gyr_psd: Vector3<f32>,
-    /// Accelerometer power spectral density
-    acc_bias_psd: Vector3<f32>,
-    /// Gyroscope power spectral density
-    gyr_bias_psd: Vector3<f32>,
+    /// Power Spectral Density of the accelerometer's white noise
+    acc_noise_var: Vector3<f32>,
+    /// Power Spectral Density of the gyroscope's white noise
+    gyr_noise_var: Vector3<f32>,
+    /// Power Spectral Density of the accelerometer bias random walk
+    acc_bias_var: Vector3<f32>,
+    /// Power Spectral Density of the gyroscope bias random walk
+    gyr_bias_var: Vector3<f32>,
 }
 
 
@@ -86,10 +93,10 @@ impl Default for ESKF {
             gyr_bias: Vector3::zeros(),
             gravity: Vector3::new(0.0, 0.0, 9.81),
             covariance: SMatrix::identity() * 0.1,
-            acc_psd: SVector::from_element(1e-3),
-            gyr_psd: SVector::from_element(1e-3),
-            acc_bias_psd: SVector::from_element(1e-4),
-            gyr_bias_psd: SVector::from_element(1e-4),
+            acc_noise_var: SVector::from_element(1e-3),
+            gyr_noise_var: SVector::from_element(1e-3),
+            acc_bias_var: SVector::from_element(1e-4),
+            gyr_bias_var: SVector::from_element(1e-4),
         }
     }
 }
@@ -101,48 +108,55 @@ impl ESKF {
         Self::default()
     }
 
-    /// Set the accelerometer measurement noise density.
-    ///
-    /// This value (N) is typically found on the IMU datasheet.
-    /// The unit should be (m/s²)/√Hz.
-    pub fn with_acc_noise_density(mut self, nd: f32) -> Self {
-        self.acc_psd = Vector3::from_element(nd * nd);
+    /// Borrow the [`ESKF`] filter mutably, returning the filter as a value.
+    pub fn with_mut(mut self, func: impl Fn(&mut Self)) -> Self {
+        func(&mut self);
         self
     }
 
-    /// Set the gyroscope measurement noise density.
+    /// Set the accelerometer measurement noise standard deviation
     ///
-    /// This value (N) is typically found on the IMU datasheet.
-    /// The unit should be (rad/s)/√Hz.
-    pub fn with_gyr_noise_density(mut self, nd: f32) -> Self {
-        self.gyr_psd = Vector3::from_element(nd * nd);
+    /// This value represents the standard deviation of the white noise affecting
+    /// a single accelerometer reading. The unit should be `(m/s²)`.
+    pub fn acc_noise_std(&mut self, std: f32) -> &mut Self {
+        self.acc_noise_var = Vector3::from_element(std.powi(2));
         self
     }
 
-    /// Set the accelerometer bias noise density (Bias Random Walk).
+    /// Set the gyroscope measurement noise standard deviation
     ///
-    /// This value (N_ba) describes the bias drift.
-    /// The unit should be (m/s²)/s/√Hz.
-    pub fn with_acc_random_walk(mut self, nd: f32) -> Self {
-        self.acc_bias_psd = Vector3::from_element(nd * nd);
+    ///
+    /// This value represents the standard deviation of the white noise affecting
+    /// a single accelerometer reading. The unit should be `(rad/s)`.
+    pub fn gyr_noise_std(&mut self, std: f32) -> &mut Self {
+        self.gyr_noise_var = Vector3::from_element(std.powi(2));
         self
     }
 
-    /// Set the gyroscope bias noise density (Bias Random Walk).
+    /// Set the accelerometer bias random walk standard deviation.
     ///
-    /// This value (N_bg) describes the bias drift.
-    /// The unit should be (rad/s)/s/√Hz.
-    pub fn with_gyr_random_walk(mut self, nd: f32) -> Self {
-        self.gyr_bias_psd = Vector3::from_element(nd * nd);
+    /// This represents the standard deviation of the bias drift accumulated
+    /// over a unit time interval. The unit should be `(m/s²)/s/√Hz`.
+    pub fn acc_bias_std(&mut self, std: f32) -> &mut Self {
+        self.acc_bias_var = Vector3::from_element(std.powi(2));
         self
     }
 
-    /// Set the diagonal elements of the covariance for the process matrix
+    /// Set the gyroscope bias random walk standard deviation.
+    ///
+    /// This represents the standard deviation of the bias drift accumulated
+    /// over a unit time interval. The unit should be `(rad/s)/s/√Hz`.
+    pub fn gyr_bias_std(&mut self, std: f32) -> &mut Self {
+        self.gyr_bias_var = Vector3::from_element(std.powi(2));
+        self
+    }
+
+    /// Set the diagonal elements of the covariance for the process matrix.
     ///
     /// The covariance value should be a small process value so that the covariance of the filter
     /// quickly converges to the correct value. Too small values could lead to the filter taking a
     /// long time to converge and report a lower covariance than what it should.
-    pub fn with_covariance_diagonal(mut self, cov: f32) -> Self {
+    pub fn covariance_diag(&mut self, cov: f32) -> &mut Self {
         self.covariance = SMatrix::identity() * cov.abs();
         self
     }
@@ -151,7 +165,7 @@ impl ESKF {
     ///
     /// The default value is (positive) 9.81 m/s² in the z direction `(0., 0., 9.81)`
     /// This is fitting for a NED (north east down) reference frame.
-    pub fn with_gravity(mut self, gravity: Vector3<f32>) -> Self {
+    pub fn with_gravity(&mut self, gravity: Vector3<f32>) -> &mut Self {
         self.gravity = gravity;
         self
     }
@@ -221,16 +235,16 @@ impl ESKF {
         let mut diagonal = self.covariance.diagonal();
         diagonal
             .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.acc_psd * dt);
+            .add_assign(self.acc_noise_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.gyr_psd * dt);
+            .add_assign(self.gyr_noise_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.acc_bias_psd * dt);
+            .add_assign(self.acc_bias_var * dt);
         diagonal
             .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.gyr_bias_psd * dt);
+            .add_assign(self.gyr_bias_var * dt);
         self.covariance.set_diagonal(&diagonal);
     }
 
@@ -333,16 +347,16 @@ impl ESKF {
         let mut diagonal = self.covariance.diagonal();
         diagonal
             .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.acc_psd * dt);
+            .add_assign(self.acc_noise_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.gyr_psd * dt);
+            .add_assign(self.gyr_noise_var * dt.powi(2));
         diagonal
             .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.acc_bias_psd * dt);
+            .add_assign(self.acc_bias_var * dt);
         diagonal
             .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.gyr_bias_psd * dt);
+            .add_assign(self.gyr_bias_var * dt);
         self.covariance.set_diagonal(&diagonal);
     }
 
@@ -567,7 +581,7 @@ fn skew(v: &Vector3<f32>) -> Matrix3<f32> {
 #[cfg(test)]
 mod test {
     use approx::assert_relative_eq;
-    use nalgebra::{Point3, UnitQuaternion, Vector3};
+    use super::nalgebra::{Point3, UnitQuaternion, Vector3};
     use std::f32::consts::FRAC_PI_2;
     use std::time::Duration;
 

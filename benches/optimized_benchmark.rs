@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use eskf::ESKF;
-use nalgebra::Vector3;
+use nalgebra_34_1::Vector3;
 use std::hint::black_box;
 
 fn benchmark_predict(
@@ -8,12 +8,13 @@ fn benchmark_predict(
     predict: fn(&mut ESKF, Vector3<f32>, Vector3<f32>, f32),
     id: &'static str,
 ) {
-    let mut filter = ESKF::new()
-        .with_acc_noise_density(0.01)
-        .with_gyr_noise_density(0.001)
-        .with_acc_random_walk(0.0001)
-        .with_gyr_random_walk(0.0001)
-        .with_covariance_diagonal(1e-6);
+    let mut filter = ESKF::new().with_mut(|filt| {
+        filt.acc_noise_std(0.01)
+            .gyr_noise_std(0.001)
+            .acc_bias_std(0.0001)
+            .gyr_bias_std(0.0001)
+            .covariance_diag(1e-6);
+    });
 
     let acc = Vector3::new(0.1, 0.2, -9.81);
     let gyr = Vector3::new(0.01, -0.02, 0.005);

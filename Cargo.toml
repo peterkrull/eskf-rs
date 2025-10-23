@@ -1,6 +1,6 @@
 [package]
 name = "eskf"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Jørgen Nordmoen <jorgen@nordmoen.net>", "Peter Krull <peterkrullpeter@gmail.com>"]
 description = "Navigation filter based on an Error State Kalman Filter (ESKF)"
 keywords = ["navigation", "filter", "attitude", "kalman"]
@@ -14,7 +14,7 @@ documentation = "https://docs.rs/eskf"
 exclude = ["docs/*"]
 
 [features]
-default = ["full-reset"]
+default = ["full-reset", "nalgebra_34_1"]
 # Perform a full filter reset during measurement update
 full-reset = []
 # A more stable covariance update, but more computationally expensive
@@ -22,17 +22,17 @@ cov-symmetric = []
 # Stable, symmetric and positive covariance update, computationally expensive
 cov-joseph = []
 # Enable to use in no_std environment
-no_std = ["nalgebra/libm", "dep:num-traits"]
+no_std = ["nalgebra_34_0?/libm", "nalgebra_34_1?/libm", "num-traits/libm"]
 
 [dependencies]
-nalgebra = { version = "0.34.0", default-features = false }
-num-traits = { version = "0.2.19", optional = true, default-features = false, features = [
-    "libm",
-] }
+nalgebra_34_1 = { version = "0.34.1", package = "nalgebra", optional = true, default-features = false }
+nalgebra_34_0 = { version = "0.34.0", package = "nalgebra", optional = true, default-features = false }
+
+num-traits = { version = "0.2.19", default-features = false, optional = true }
 
 [dev-dependencies]
 approx = "0.5.0"
-nalgebra = { version = "0.34.0", features = ["serde-serialize", "debug"] }
+nalgebra_34_1 = { version = "0.34.1", package = "nalgebra", features = ["serde-serialize", "debug"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 plotly = "0.6.0"
@@ -40,7 +40,7 @@ criterion = "*"
 
 [[example]]
 name = "plot_carla"
-required-features = ["std"]
+required-features = []
 
 [[bench]]
 name = "optimized_benchmark"

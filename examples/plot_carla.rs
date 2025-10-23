@@ -1,5 +1,5 @@
 //! Example which reads data from the CARLA dataset and plots filter state
-use nalgebra::{Point3, Vector3};
+use nalgebra_34_1::{Point3, Vector3, SMatrix};
 use plotly::common::{ErrorData, ErrorType};
 use plotly::layout::{GridPattern, Layout, LayoutGrid};
 use plotly::{Plot, Scatter};
@@ -17,9 +17,11 @@ struct Variance {
 
 #[derive(Deserialize, Debug)]
 struct GroundTruth {
+    #[allow(unused)]
     acceleration: Vector3<f32>,
     velocity: Vector3<f32>,
     position: Point3<f32>,
+    #[allow(unused)]
     orientation_euler: Vector3<f32>,
 }
 
@@ -116,16 +118,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(file);
     let dataset: Dataset = serde_json::from_reader(reader)?;
     let position_variance =
-        eskf::ESKF::variance_from_element(dataset.variance.gnss_position.sqrt());
+        SMatrix::from_diagonal_element(dataset.variance.gnss_position.sqrt());
     // Create lines that we want to plot
     let mut plot_pos = PlotRow::default();
     let mut plot_vel = PlotRow::default();
     // Create filter based on dataset
-    let mut filter = eskf::Builder::new()
-        .acc_noise_density(dataset.variance.imu_acceleration)
-        .gyr_noise_density(dataset.variance.imu_rotation)
-        .initial_covariance(1e-1)
-        .build();
+    let mut filter = eskf::ESKF::new().with_mut(|filt| {
+        filt.acc_noise_std(dataset.variance.imu_acceleration)
+            .gyr_noise_std(dataset.variance.imu_rotation)
+            .covariance_diag(1e-1);
+    });
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
     // Time delta is based on viewing the dataset and choosing a small value that could fit

@@ -1,7 +1,7 @@
 //! Integration tests which uses data from the [CARLA simulator](https://carla.org/)
 use approx::assert_relative_eq;
 use eskf;
-use nalgebra::{Point3, UnitQuaternion, Vector3};
+use nalgebra_34_1::{Point3, UnitQuaternion, Vector3, SMatrix};
 use serde::Deserialize;
 use serde_json;
 use std::fs::File;
@@ -56,12 +56,14 @@ fn dataset1() {
     let reader = BufReader::new(file);
     let dataset: Dataset = serde_json::from_reader(reader).expect("Could not parse JSON");
     let position_variance =
-        nalgebra::Matrix3::from_diagonal_element(dataset.variance.gnss_position.sqrt());
+        SMatrix::from_diagonal_element(dataset.variance.gnss_position.sqrt());
     // Create filter based on dataset
-    let mut filter = eskf::ESKF::new()
-        .with_acc_noise_density(dataset.variance.imu_acceleration)
-        .with_gyr_noise_density(dataset.variance.imu_rotation)
-        .with_covariance_diagonal(1e-1);
+    let mut filter = eskf::ESKF::new().with_mut(|filt| {
+        filt.acc_noise_std(dataset.variance.imu_acceleration)
+            .gyr_noise_std(dataset.variance.imu_rotation)
+            .covariance_diag(1e-1);
+    });
+
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
     // Time delta is based on viewing the dataset and choosing a small value that could fit
