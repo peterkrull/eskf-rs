@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use eskf::ESKF;
-use nalgebra_34_1::Vector3;
+use nalgebra::Vector3;
 use std::hint::black_box;
 
 fn benchmark_predict(

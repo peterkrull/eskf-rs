@@ -1,7 +1,7 @@
 //! Integration tests which uses data from the [CARLA simulator](https://carla.org/)
 use approx::assert_relative_eq;
 use eskf;
-use nalgebra_34_1::{Point3, UnitQuaternion, Vector3, SMatrix};
+use nalgebra::{Point3, UnitQuaternion, Vector3, SMatrix};
 use serde::Deserialize;
 use serde_json;
 use std::fs::File;

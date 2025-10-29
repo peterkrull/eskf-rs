@@ -14,7 +14,7 @@ documentation = "https://docs.rs/eskf"
 exclude = ["docs/*"]
 
 [features]
-default = ["full-reset", "nalgebra_34_1"]
+default = ["full-reset"]
 # Perform a full filter reset during measurement update
 full-reset = []
 # A more stable covariance update, but more computationally expensive
@@ -22,17 +22,15 @@ cov-symmetric = []
 # Stable, symmetric and positive covariance update, computationally expensive
 cov-joseph = []
 # Enable to use in no_std environment
-no_std = ["nalgebra_34_0?/libm", "nalgebra_34_1?/libm", "num-traits/libm"]
+no_std = ["nalgebra/libm", "num-traits/libm"]
 
 [dependencies]
-nalgebra_34_1 = { version = "0.34.1", package = "nalgebra", optional = true, default-features = false }
-nalgebra_34_0 = { version = "0.34.0", package = "nalgebra", optional = true, default-features = false }
-
+nalgebra = { version = "~0.34", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, optional = true }
 
 [dev-dependencies]
 approx = "0.5.0"
-nalgebra_34_1 = { version = "0.34.1", package = "nalgebra", features = ["serde-serialize", "debug"] }
+nalgebra = { version = "~0.34", features = ["serde-serialize", "debug"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 plotly = "0.6.0"

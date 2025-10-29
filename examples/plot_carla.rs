@@ -1,5 +1,5 @@
 //! Example which reads data from the CARLA dataset and plots filter state
-use nalgebra_34_1::{Point3, Vector3, SMatrix};
+use nalgebra::{Point3, Vector3, SMatrix};
 use plotly::common::{ErrorData, ErrorType};
 use plotly::layout::{GridPattern, Layout, LayoutGrid};
 use plotly::{Plot, Scatter};
