@@ -1,13 +1,6 @@
-# Error State Kalman Filter (`ESKF`)
-[![Continuous integration](https://github.com/nordmoen/eskf-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/nordmoen/eskf-rs/actions/workflows/ci.yml)
-[![Crates.io version](https://img.shields.io/crates/v/eskf.svg)](https://crates.io/crates/eskf)
-[![Docs.rs version](https://docs.rs/eskf/badge.svg)](https://docs.rs/eskf)
+# Embeddable navigation filter
 
-This crate implements a navigation filter based on an [Error State Kalman
-Filter](./docs/Error_State_Kalman_Filter.pdf).
-
-This crate supports `no_std` environments, but few optimizations to the
-mathematics have been attempted to optimize for `no_std`.
+This is a fork of [eskf-rs](https://github.com/nordmoen/eskf-rs/) tailored for `no_std` embedded environments with all statically allocated matrices, and an unrolled prediction function for much better performance. An STM32F405 is able to do a full integration of IMU measurements and prediction, including the 15x15 covariance propagation, in approximately 38 µs. This implementation is thus suitable embedded for real-time estimation.
 
 ## Error State Kalman Filter (ESKF)
 An [Error State Kalman Filter](https://arxiv.org/abs/1711.02508) is a navigation
@@ -19,29 +12,62 @@ explicitly.
 The navigation filter is used to track `position`, `velocity` and `orientation`
 of an object which is sensing its state through an [Inertial Measurement Unit
 (IMU)](https://en.wikipedia.org/wiki/Inertial_measurement_unit) and some means
-of observing the true state of the filter such as GPS, LIDAR or visual odometry.
+of observing the true state of the filter such as GPS, LIDAR or visual odometry. 
+Additionally, the bias of the accelerometer and gyroscope belonging to the IMU
+is estimated for even more accurate estimation.
 
 ## Usage
 ```rust
-use eskf;
-use nalgebra::{Vector3, Point3};
-use std::time::Duration;
+use eskf::ESKF;
+use nalgebra::{SMatrix, Vector3, Point3};
 
-// Create a default filter, modelling a perfect IMU without drift
-let mut filter = eskf::Builder::new().build();
-// Read measurements from IMU
-let imu_acceleration = Vector3::new(0.0, 0.0, -9.81);
-let imu_rotation = Vector3::zeros();
-// Tell the filter what we just measured
-filter.predict(imu_acceleration, imu_rotation, Duration::from_millis(1000));
-// Check the new state of the filter
-// filter.position or filter.velocity...
-// ...
-// After some time we get an observation of the actual state
-filter.observe_position(
-    Point3::new(0.0, 0.0, 0.0),
-    eskf::ESKF::variance_from_element(0.1))
-        .expect("Filter update failed");
-// Since we have supplied an observation of the actual state of the filter the states have now
-// been updated. The uncertainty of the filter is also updated to reflect this new information.
+// Create the filter and configure the parameters.
+let mut filter = ESKF::new();
+filt.acc_noise_std(0.05);
+filt.gyr_noise_std(0.01);
+filt.acc_bias_std(0.001);
+filt.acc_bias_std(0.001);
+filt.covariance_diag(0.2);
+filt.with_gravity(Vector3::z() * 9.81);
+
+loop {
+
+    // We are likely fusing multiple types of sensors, so in an async framework
+    // we might just select over some futures which yields the measurements.
+    match select(
+        imu_sensor.read_6dof(),
+        pos_sensor.read_position()
+    ).await {
+        First(imu_data) => {
+            // The IMU measurements are automatically adjusted using the
+            // estimated bias, and rotated into the global reference frame
+            // to update the position, velocity and rotation estimates.
+            filter.predict_optimized(
+                imu_data.acc.into(),
+                imu_data.gyr.into(),
+            );
+
+            // Now we can use the estimates (see "Usage tip" below)
+            let pos = filter.position;
+            let vel = filter.velocity;
+            let rot = filter.rotation;
+        },
+        Second(pos_data) => {
+            if filter.observe_position(
+                Point3::new(pos_data.x, pos_data.y, pos_data.z),
+                SMatrix::from_diagonal_element(pos_data.var),
+            ).is_err() {
+                // This is a basic way to handle the error case. It might also
+                // be fine to initially skip the observation, and let the
+                // covariance evolve a bit until the next observation.
+                defmt::error!("[eskf] Could not compute, resetting covariance");
+                filt.covariance_diag(0.2);
+            }
+        }
+    }
+}
 ```
+
+### Usage tip
+
+While the Kalman filter is optimal in the least-squares sense, it might not be ideal to use some of its values directily. Specifically, the position estimate is likely to "jump" slightly whenever a new observation makes a correction. This could result in large derivative spikes for a position controller. However, complimentary filtering the estimated position and velocity can yield a much smoother and less jumpy position estimate, without losing any useful high frequency information.
