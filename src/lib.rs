@@ -1,14 +1,10 @@
-//! # Error State Kalman Filter (ESKF)
-//! An [Error State Kalman Filter](https://arxiv.org/abs/1711.02508) is a navigation filter based
-//! on regular Kalman filters, more specifically [Extended Kalman
-//! Filters](https://en.wikipedia.org/wiki/Extended_Kalman_filter), that model the "error state" of
-//! the system instead of modelling the movement of the system.
+//! # 15-state navigation filter for embedded systems
 //!
-//! The navigation filter is used to track `position`, `velocity` and `rotation` of an object
-//! which is sensing its state through an [Inertial Measurement Unit
-//! (IMU)](https://en.wikipedia.org/wiki/Inertial_measurement_unit) and some means of observing the
-//! true state of the filter such as GPS, LIDAR or visual odometry.
-//! ```
+//! Based on the [Error State Kalman Filter](https://arxiv.org/abs/1711.02508)
+//! formulation, [`NavigationFilter`] is able to track the `position`,
+//! `velocity` and `rotation` of an object, sensing its state through an
+//! Inertial Measurement Unit (IMU) and some means of observing the true state
+//! of the filter such as GPS, LIDAR or visual odometry.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
@@ -16,7 +12,7 @@
 
 use core::ops::{AddAssign, SubAssign};
 
-use nalgebra::{Matrix2, Matrix3, Point3, SMatrix, SVector, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{SMatrix, SVector, UnitQuaternion};
 
 #[cfg(feature = "no_std")]
 use num_traits::float::Float as _;
@@ -24,135 +20,160 @@ use num_traits::float::Float as _;
 /// Potential errors raised during operations
 #[derive(Copy, Clone, Debug)]
 pub enum Error {
-    /// It is not always [the case that a matrix is
-    /// invertible](https://en.wikipedia.org/wiki/Invertible_matrix) which can lead to errors. It
-    /// is difficult to handle this both for the library and for the users. In the case of the
-    /// [`ESKF`], if this happens, it may be caused by an irregular shaped variance matrix for the
-    /// update step. In such cases, inspect the variance matrix. If this happens irregularly it can
-    /// be a sign that the uncertainty update is not stable, if possible try one of `cov-symmetric`
-    /// or `cov-joseph` features for a more stable update.
+    /// It is not always the case that a matrix is invertible which can lead to
+    /// errors. It is difficult to handle this both for the library and for the
+    /// users. In the case of the [`ESKF`], if this happens, it may be caused by
+    /// an irregular shaped variance matrix for the update step. In such cases,
+    /// inspect the variance matrix. If this happens irregularly it can be a
+    /// sign that the uncertainty update is not stable, if possible try one of
+    /// `cov-symmetric` or `cov-joseph` features for a more stable update.
     InversionError,
 }
 
 /// Helper definition to make it easier to work with errors
-pub type Result<T> = core::result::Result<T, Error>;
+pub type Res<T> = core::result::Result<T, Error>;
 
 /// Error State Kalman Filter
 ///
-/// The filter works by calling [`predict`](ESKF::predict) and one or more of the
-/// [`observe_`](ESKF::observe_position) methods when data is available. It is expected that
-/// several calls to [`predict`](ESKF::predict) will be in between calls to `observe_`.
+/// The filter works by calling [`predict`](NavigationFilter::predict) and one
+/// or more of the [`observe_`](NavigationFilter::observe_position) methods when
+/// data is available..
 ///
-/// The [`predict`](ESKF::predict) step updates the internal state of the filter based on measured
-/// acceleration and rotation coming from an IMU. This step updates the states in the filter based
-/// on kinematic equations while increasing the uncertainty of the filter. When one of the
-/// `observe_` methods are called, the filter updates the internal state based on this observation,
-/// which exposes the error state to the filter, which we can then use to correct the internal
-/// state. The uncertainty of the filter is also updated to reflect the variance of the observation
-/// and the updated state.
+/// The [`predict`](NavigationFilter::predict) step updates the internal state
+/// of the filter based on measured acceleration and angular rate coming from an
+/// IMU. This step updates the states in the filter based on kinematic equations
+/// while increasing the uncertainty of the filter. When one of the `observe_`
+/// methods are called, the filter updates the internal state based on this
+/// observation, which exposes the error state to the filter, which we can then
+/// use to correct the internal state. The uncertainty of the filter is also
+/// updated to reflect the variance of the observation and the updated state.
 #[derive(Copy, Clone, Debug)]
-pub struct ESKF {
+pub struct NavigationFilter {
     /// Estimated position in filter
-    pub position: Point3<f32>,
+    pub position: SVector<f32, 3>,
     /// Estimated velocity in filter
-    pub velocity: Vector3<f32>,
+    pub velocity: SVector<f32, 3>,
     /// Estimated rotation in filter
     pub rotation: UnitQuaternion<f32>,
     /// Estimated acceleromter bias
-    pub acc_bias: Vector3<f32>,
+    pub acc_bias: SVector<f32, 3>,
     /// Estimated gyroscope bias
-    pub gyr_bias: Vector3<f32>,
+    pub gyr_bias: SVector<f32, 3>,
     /// Gravity vector.
-    pub gravity: Vector3<f32>,
+    pub gravity: SVector<f32, 3>,
     /// Covariance of filter state
     covariance: SMatrix<f32, 15, 15>,
-    /// Power Spectral Density of the accelerometer's white noise
-    acc_noise_var: Vector3<f32>,
-    /// Power Spectral Density of the gyroscope's white noise
-    gyr_noise_var: Vector3<f32>,
-    /// Power Spectral Density of the accelerometer bias random walk
-    acc_bias_var: Vector3<f32>,
-    /// Power Spectral Density of the gyroscope bias random walk
-    gyr_bias_var: Vector3<f32>,
+    /// Power Spectral Density of the accelerometer's white noise.
+    acc_noise_psd: SVector<f32, 3>,
+    /// Power Spectral Density of the gyroscope's white noise.
+    gyr_noise_psd: SVector<f32, 3>,
+    /// Power Spectral Density of the accelerometer bias random walk.
+    acc_bias_psd: SVector<f32, 3>,
+    /// Power Spectral Density of the gyroscope bias random walk.
+    gyr_bias_psd: SVector<f32, 3>,
 }
 
-
-impl Default for ESKF {
+impl Default for NavigationFilter {
     fn default() -> Self {
-        ESKF {
-            position: Point3::origin(),
-            velocity: Vector3::zeros(),
+        NavigationFilter {
+            position: SVector::zeros(),
+            velocity: SVector::zeros(),
             rotation: UnitQuaternion::identity(),
-            acc_bias: Vector3::zeros(),
-            gyr_bias: Vector3::zeros(),
-            gravity: Vector3::new(0.0, 0.0, 9.81),
-            covariance: SMatrix::identity() * 0.1,
-            acc_noise_var: SVector::from_element(1e-3),
-            gyr_noise_var: SVector::from_element(1e-3),
-            acc_bias_var: SVector::from_element(1e-4),
-            gyr_bias_var: SVector::from_element(1e-4),
+            acc_bias: SVector::zeros(),
+            gyr_bias: SVector::zeros(),
+            gravity: SVector::z() * 9.81,
+            covariance: SMatrix::from_diagonal(
+                &[
+                    0.2, 0.2, 0.2,
+                    0.02, 0.02, 0.02,
+                    0.05, 0.05, 0.05,
+                    1e-4, 1e-4, 1e-4, 
+                    1e-4, 1e-4, 1e-4,
+                ]
+                .into(),
+            ),
+            acc_noise_psd: SVector::from_element(1e-3),
+            gyr_noise_psd: SVector::from_element(1e-3),
+            acc_bias_psd: SVector::from_element(1e-5),
+            gyr_bias_psd: SVector::from_element(1e-5),
         }
     }
 }
 
-impl ESKF {
-
-    /// Construct a new filter with default values.
-    pub fn new() -> ESKF {
+impl NavigationFilter {
+    /// Construct a new filter with default values, with gravity pointing in
+    /// in the positive z-direction, good for north-east-down (NED) coordinates.
+    pub fn new() -> NavigationFilter {
         Self::default()
     }
 
-    /// Borrow the [`ESKF`] filter mutably, returning the filter as a value.
-    pub fn with_mut(mut self, func: impl Fn(&mut Self)) -> Self {
-        func(&mut self);
+    /// Set the accelerometer's **white noise density** (standard deviation).
+    ///
+    /// This value is typically found on the sensor's datasheet, often called
+    /// "Noise Density" or "Velocity Random Walk" (VRW).
+    ///
+    /// The unit must be `(m/s²) / √Hz`.
+    pub fn acc_noise_density(mut self, noise_density: f32) -> Self {
+        self.acc_noise_psd = SVector::from_element(noise_density.powi(2));
         self
     }
 
-    /// Set the accelerometer measurement noise standard deviation
+    /// Set the gyroscope's **white noise density** (standard deviation).
     ///
-    /// This value represents the standard deviation of the white noise
-    /// affecting a single accelerometer reading. The unit should be `(m/s²)`.
-    pub fn acc_noise_std(&mut self, std: f32) -> &mut Self {
-        self.acc_noise_var = Vector3::from_element(std.powi(2));
+    /// This value is typically found on the sensor's datasheet, often called
+    /// "Noise Density" or "Angle Random Walk" (ARW).
+    ///
+    /// The unit must be `(rad/s) / √Hz`.
+    pub fn gyr_noise_density(mut self, noise_density: f32) -> Self {
+        self.gyr_noise_psd = SVector::from_element(noise_density.powi(2));
         self
     }
 
-    /// Set the gyroscope measurement noise standard deviation
+    /// Set the accelerometer's **bias random walk** (standard deviation).
     ///
+    /// This value represents the standard deviation of the bias drift,
+    /// modeling it as a continuous random walk.
     ///
-    /// This value represents the standard deviation of the white noise
-    /// affecting a single accelerometer reading. The unit should be `(rad/s)`.
-    pub fn gyr_noise_std(&mut self, std: f32) -> &mut Self {
-        self.gyr_noise_var = Vector3::from_element(std.powi(2));
+    /// The unit must be `(m/s²) / √s` (or `(m/s²) / s / √Hz`).
+    pub fn acc_bias_random_walk(mut self, random_walk: f32) -> Self {
+        self.acc_bias_psd = SVector::from_element(random_walk.powi(2));
         self
     }
 
-    /// Set the accelerometer bias drift random walk standard deviation.
+    /// Set the gyroscope's **bias random walk** (standard deviation).
     ///
-    /// This represents the standard deviation of the bias drift accumulated
-    /// over a unit time interval. The unit should be `(m/s²)/s/√Hz`.
-    pub fn acc_bias_std(&mut self, std: f32) -> &mut Self {
-        self.acc_bias_var = Vector3::from_element(std.powi(2));
+    /// This value represents the standard deviation of the bias drift,
+    /// modeling it as a continuous random walk.
+    ///
+    /// The unit must be `(rad/s) / √s` (or `(rad/s) / s / √Hz`).
+    pub fn gyr_bias_random_walk(mut self, random_walk: f32) -> Self {
+        self.gyr_bias_psd = SVector::from_element(random_walk.powi(2));
         self
     }
 
-    /// Set the gyroscope bias drift random walk standard deviation.
+    /// Set all diagonal elements of the covariance for the process matrix.
     ///
-    /// This represents the standard deviation of the bias drift accumulated
-    /// over a unit time interval. The unit should be `(rad/s)/s/√Hz`.
-    pub fn gyr_bias_std(&mut self, std: f32) -> &mut Self {
-        self.gyr_bias_var = Vector3::from_element(std.powi(2));
+    /// The covariance value should be a small process value so that the
+    /// covariance of the filter quickly converges to the correct value. Too
+    /// small values could lead to the filter taking a long time to converge and
+    /// report a lower covariance than what it should.
+    ///
+    /// Note: Values smaller than `1e-9` will be clamped to this value.
+    pub fn covariance_diag_element(mut self, cov: f32) -> Self {
+        self.covariance = SMatrix::identity() * cov.max(1e-9);
         self
     }
 
     /// Set the diagonal elements of the covariance for the process matrix.
     ///
     /// The covariance value should be a small process value so that the
-    /// covariance of the filter quickly converges to the correct value.
-    /// Too small values could lead to the filter taking a long time to
-    /// converge and report a lower covariance than what it should.
-    pub fn covariance_diag(&mut self, cov: f32) -> &mut Self {
-        self.covariance = SMatrix::identity() * cov.abs();
+    /// covariance of the filter quickly converges to the correct value. Too
+    /// small values could lead to the filter taking a long time to converge and
+    /// report a lower covariance than what it should.
+    ///
+    /// Note: Values smaller than 1e-9 will be clamped to this value.
+    pub fn covariance_diag(mut self, cov: impl Into<SVector<f32, 15>>) -> Self {
+        self.covariance = SMatrix::from_diagonal(&cov.into().map(|x| x.max(1e-9)));
         self
     }
 
@@ -160,234 +181,260 @@ impl ESKF {
     ///
     /// The default value is (positive) 9.81 m/s² in the z direction.
     /// This is fitting for a NED (north east down) reference frame.
-    pub fn with_gravity(&mut self, gravity: Vector3<f32>) -> &mut Self {
-        self.gravity = gravity;
+    pub fn with_gravity(mut self, gravity: impl Into<SVector<f32, 3>>) -> Self {
+        self.gravity = gravity.into();
         self
     }
 
     /// Get the uncertainty of the position estimate
-    pub fn position_variance(&self) -> Vector3<f32> {
-        self.variance_3(0)
+    pub fn position_uncertainty(&self) -> SVector<f32, 3> {
+        self.uncertainty_3(0)
     }
 
     /// Get the uncertainty of the velocity estimate
-    pub fn velocity_variance(&self) -> Vector3<f32> {
-        self.variance_3(3)
+    pub fn velocity_uncertainty(&self) -> SVector<f32, 3> {
+        self.uncertainty_3(3)
     }
 
     /// Get the uncertainty of the rotation estimate
-    pub fn rotation_variance(&self) -> Vector3<f32> {
-        self.variance_3(6)
+    pub fn rotation_uncertainty(&self) -> SVector<f32, 3> {
+        self.uncertainty_3(6)
+    }
+
+    /// Get the uncertainty accelerometer bias estimate
+    pub fn acc_bias_uncertainty(&self) -> SVector<f32, 3> {
+        self.uncertainty_3(9)
+    }
+
+    /// Get the uncertainty gyroscope bias estimate
+    pub fn gyr_bias_uncertainty(&self) -> SVector<f32, 3> {
+        self.uncertainty_3(12)
     }
 
     /// Internal helper method to extract 3 dimensional uncertainty from the covariance state
-    fn variance_3(&self, start: usize) -> Vector3<f32> {
+    fn uncertainty_3(&self, start: usize) -> SVector<f32, 3> {
         self.covariance
+            .fixed_view::<3, 3>(start, start)
             .diagonal()
-            .fixed_view_mut::<3, 1>(start, 0)
             .map(|var| var.sqrt())
     }
 
-    /// Get the full covariance matrix. See `*_uncertainty` methods for
-    pub fn full_covariance(&self) -> &SMatrix<f32, 15, 15> {
+    /// Get the full covariance matrix. See `*_uncertainty` methods for the
+    /// variance of specific estimates.
+    pub fn covariance_matrix(&self) -> &SMatrix<f32, 15, 15> {
         &self.covariance
     }
 
-    /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
-    /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
-    pub fn predict(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
-        let rot_acc_grav =
-            self.rotation.transform_vector(&(acc_meas - self.acc_bias)) + self.gravity;
-        let delta_rotation = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
-        let orient_mat = self.rotation.to_rotation_matrix().into_inner();
-        
-        // Update internal state kinematics
-        self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
-        self.velocity += rot_acc_grav * dt;
-        self.rotation *= delta_rotation;
-
-        // Propagate uncertainty, since we have not observed any new information about the state of
-        // the filter we need to update our estimate of the uncertainty of the filer
-        let ident_delta = Matrix3::<f32>::identity() * dt;
-        let mut error_jacobian = SMatrix::<f32, 15, 15>::identity();
-        error_jacobian
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&ident_delta);
-        error_jacobian
-            .fixed_view_mut::<3, 3>(3, 6)
-            .copy_from(&(-orient_mat * skew(&(acc_meas - self.acc_bias)) * dt));
-        error_jacobian
-            .fixed_view_mut::<3, 3>(3, 9)
-            .copy_from(&(-orient_mat * dt));
-        error_jacobian
-            .fixed_view_mut::<3, 3>(6, 6)
-            .copy_from(&delta_rotation.to_rotation_matrix().into_inner().transpose());
-        error_jacobian
-            .fixed_view_mut::<3, 3>(6, 12)
-            .copy_from(&-ident_delta);
-
-        // Add noise variance
-        self.covariance = error_jacobian * self.covariance * error_jacobian.transpose();
-        let mut diagonal = self.covariance.diagonal();
-        diagonal
-            .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.acc_noise_var * dt.powi(2));
-        diagonal
-            .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.gyr_noise_var * dt.powi(2));
-        diagonal
-            .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.acc_bias_var * dt);
-        diagonal
-            .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.gyr_bias_var * dt);
-        self.covariance.set_diagonal(&diagonal);
+    fn cov3_copy_from(&mut self, row: usize, col: usize, other: &SMatrix<f32, 3, 3>) {
+        self.covariance
+            .fixed_view_mut::<3, 3>(row, col)
+            .copy_from(other);
     }
 
-    /// Update the filter, predicting the new state, based on measured acceleration and angular velocity
-    /// from an `IMU`. The accelerometer readings must be m/s^2, and the gyroscope reading must be rad/s.
-    ///
-    /// This is the optimized implementation that uses matrix symmetry to minimize memory operations.
-    pub fn predict_optimized(&mut self, acc_meas: Vector3<f32>, gyr_meas: Vector3<f32>, dt: f32) {
-        let rot_acc_grav =
-            self.rotation.transform_vector(&(acc_meas - self.acc_bias)) + self.gravity;
-        let norm_rot = UnitQuaternion::from_scaled_axis((gyr_meas - self.gyr_bias) * dt);
-        let orient_mat = self.rotation.to_rotation_matrix().into_inner();
+    fn cov3_clone(&mut self, row: usize, col: usize) -> SMatrix<f32, 3, 3> {
+        self.covariance.fixed_view::<3, 3>(row, col).clone_owned()
+    }
+
+    /// Update the filter, predicting the new state, based on measured
+    /// acceleration and angular velocity from an `IMU`. The accelerometer
+    /// readings must be m/s^2, and the gyroscope reading must be rad/s.
+    pub fn predict(&mut self, acc_meas: SVector<f32, 3>, gyr_meas: SVector<f32, 3>, dt: f32) {
+        // Adjust measurement using predicted bias
+        let acc_corrected = acc_meas - self.acc_bias;
+        let gyr_corrected = gyr_meas - self.gyr_bias;
+
+        // Rotate acceleration into world frame and compensate for gravity
+        let rot_acc_grav = self.rotation.transform_vector(&acc_corrected) + self.gravity;
+
+        // Change in rotation according to gyroscope measurements
+        let delta_rot = UnitQuaternion::from_scaled_axis(gyr_corrected * dt);
+
+        // Save the apriori rotation matrix for covariance propagation step
+        let rot_mat = self.rotation.to_rotation_matrix().into_inner();
 
         // Update internal state kinematics
         self.position += self.velocity * dt + 0.5 * rot_acc_grav * dt.powi(2);
         self.velocity += rot_acc_grav * dt;
-        self.rotation *= norm_rot;
+        self.rotation *= delta_rot;
+
+        // Ensure rotation stays consistent
+        self.rotation.renormalize_fast();
 
         // Block-entries of error jacobian and their transposes
-        let f36 = -orient_mat * skew(&(acc_meas - self.acc_bias)) * dt;
-        let f39 = -orient_mat * dt;
-        let f66 = norm_rot.to_rotation_matrix().into_inner().transpose();
+        let f_1_2 = -rot_mat * skew(acc_corrected) * dt;
+        let f_1_3 = -rot_mat * dt;
+        let f_2_2_t = delta_rot.to_rotation_matrix().into_inner();
 
-        // Extract the 15 upper-triangle blocks from the current covariance matrix
-        let p_1_1 = self.covariance.fixed_view::<3, 3>(0, 0).clone_owned();
-        let p_1_2 = self.covariance.fixed_view::<3, 3>(0, 3).clone_owned();
-        let p_1_3 = self.covariance.fixed_view::<3, 3>(0, 6).clone_owned();
-        let p_1_4 = self.covariance.fixed_view::<3, 3>(0, 9).clone_owned();
-        let p_1_5 = self.covariance.fixed_view::<3, 3>(0, 12).clone_owned();
+        let f_1_2_t = f_1_2.transpose();
+        let f_1_3_t = f_1_3.transpose();
+        let f_2_2 = f_2_2_t.transpose();
 
-        let p_2_2 = self.covariance.fixed_view::<3, 3>(3, 3).clone_owned();
-        let p_2_3 = self.covariance.fixed_view::<3, 3>(3, 6).clone_owned();
-        let p_2_4 = self.covariance.fixed_view::<3, 3>(3, 9).clone_owned();
-        let p_2_5 = self.covariance.fixed_view::<3, 3>(3, 12).clone_owned();
+        // Extract the 15 upper-triangle blocks from the covariance matrix
+        let p_1_1 = self.cov3_clone(0, 0);
+        let p_1_2 = self.cov3_clone(0, 3);
+        let p_1_3 = self.cov3_clone(0, 6);
+        let p_1_4 = self.cov3_clone(0, 9);
+        let p_1_5 = self.cov3_clone(0, 12);
 
-        let p_3_3 = self.covariance.fixed_view::<3, 3>(6, 6).clone_owned();
-        let p_3_4 = self.covariance.fixed_view::<3, 3>(6, 9).clone_owned();
-        let p_3_5 = self.covariance.fixed_view::<3, 3>(6, 12).clone_owned();
+        let p_2_2 = self.cov3_clone(3, 3);
+        let p_2_3 = self.cov3_clone(3, 6);
+        let p_2_4 = self.cov3_clone(3, 9);
+        let p_2_5 = self.cov3_clone(3, 12);
 
-        let p_4_4 = self.covariance.fixed_view::<3, 3>(9, 9).clone_owned();
-        let p_4_5 = self.covariance.fixed_view::<3, 3>(9, 12).clone_owned();
+        let p_3_3 = self.cov3_clone(6, 6);
+        let p_3_4 = self.cov3_clone(6, 9);
+        let p_3_5 = self.cov3_clone(6, 12);
 
-        let p_5_5 = self.covariance.fixed_view::<3, 3>(12, 12).clone_owned();
+        let p_4_4 = self.cov3_clone(9, 9);
+        let p_4_5 = self.cov3_clone(9, 12);
 
-        // Row 1
-        self.covariance
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(p_1_1 + dt * (p_1_2.transpose() + p_1_2 + dt * p_2_2)));
-        self.covariance.fixed_view_mut::<3, 3>(0, 3).copy_from(
-            &(p_1_2
-                + dt * p_2_2
-                + (p_1_3 + dt * p_2_3) * f36.transpose()
-                + (p_1_4 + dt * p_2_4) * f39.transpose()),
-        );
-        self.covariance
-            .fixed_view_mut::<3, 3>(0, 6)
-            .copy_from(&((p_1_3 + dt * p_2_3) * f66.transpose() - dt * (p_1_5 + dt * p_2_5)));
-        self.covariance
-            .fixed_view_mut::<3, 3>(0, 9)
-            .copy_from(&(p_1_4 + dt * p_2_4));
-        self.covariance
-            .fixed_view_mut::<3, 3>(0, 12)
-            .copy_from(&(p_1_5 + dt * p_2_5));
+        let p_5_5 = self.cov3_clone(12, 12);
 
-        // Row 2
-        self.covariance.fixed_view_mut::<3, 3>(3, 3).copy_from(
+        // Block-row 1
+        let temp_2 = &p_1_2 + dt * &p_2_2;
+        let temp_3 = &p_1_3 + dt * &p_2_3;
+        let temp_4 = &p_1_4 + dt * &p_2_4;
+        let temp_5 = &p_1_5 + dt * &p_2_5;
+        self.cov3_copy_from(0, 0, &(p_1_1 + dt * (p_1_2.transpose() + temp_2)));
+        self.cov3_copy_from(0, 3, &(temp_2 + &temp_3 * &f_1_2_t + &temp_4 * &f_1_3_t));
+        self.cov3_copy_from(0, 6, &(temp_3 * &f_2_2_t - dt * &temp_5));
+        self.cov3_copy_from(0, 9, &temp_4);
+        self.cov3_copy_from(0, 12, &temp_5);
+
+        // Block-row 2
+        let temp_3 = &p_2_3 + &f_1_2 * &p_3_3 + &f_1_3 * &p_3_4.transpose();
+        let temp_4 = &p_2_4 + &f_1_2 * &p_3_4 + &f_1_3 * &p_4_4;
+        let temp_5 = &p_2_5 + &f_1_2 * &p_3_5 + &f_1_3 * &p_4_5;
+        self.cov3_copy_from(
+            3,
+            3,
             &(p_2_2
-                + f36 * p_2_3.transpose()
-                + f39 * p_2_4.transpose()
-                + (p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f36.transpose()
-                + (p_2_4 + f36 * p_3_4 + f39 * p_4_4) * f39.transpose()),
+                + &f_1_2 * p_2_3.transpose()
+                + &f_1_3 * p_2_4.transpose()
+                + &temp_3 * &f_1_2_t
+                + &temp_4 * &f_1_3_t),
         );
-        self.covariance.fixed_view_mut::<3, 3>(3, 6).copy_from(
-            &((p_2_3 + f36 * p_3_3 + f39 * p_3_4.transpose()) * f66.transpose()
-                - dt * (p_2_5 + f36 * p_3_5 + f39 * p_4_5)),
-        );
-        self.covariance
-            .fixed_view_mut::<3, 3>(3, 9)
-            .copy_from(&(p_2_4 + f36 * p_3_4 + f39 * p_4_4));
-        self.covariance
-            .fixed_view_mut::<3, 3>(3, 12)
-            .copy_from(&(p_2_5 + f36 * p_3_5 + f39 * p_4_5));
+        self.cov3_copy_from(3, 6, &(temp_3 * &f_2_2_t - dt * &temp_5));
+        self.cov3_copy_from(3, 9, &temp_4);
+        self.cov3_copy_from(3, 12, &temp_5);
 
-        // Row 3
-        self.covariance.fixed_view_mut::<3, 3>(6, 6).copy_from(
-            &((f66 * p_3_3 - dt * p_3_5.transpose()) * f66.transpose()
-                - dt * (f66 * p_3_5 - dt * p_5_5)),
-        );
-        self.covariance
-            .fixed_view_mut::<3, 3>(6, 9)
-            .copy_from(&(f66 * p_3_4 - dt * p_4_5.transpose()));
-        self.covariance
-            .fixed_view_mut::<3, 3>(6, 12)
-            .copy_from(&(f66 * p_3_5 - dt * p_5_5));
+        // Block-row 3
+        let temp_3 = &f_2_2 * &p_3_3 - dt * &p_3_5.transpose();
+        let temp_4 = &f_2_2 * &p_3_4 - dt * &p_4_5.transpose();
+        let temp_5 = &f_2_2 * &p_3_5 - dt * &p_5_5;
+        self.cov3_copy_from(6, 6, &(temp_3 * f_2_2_t - dt * temp_5));
+        self.cov3_copy_from(6, 9, &temp_4);
+        self.cov3_copy_from(6, 12, &temp_5);
 
-        // Row 4 and 5 can be omitted since they are not changed..
+        // Row 4 and 5 can be omitted since they are not changed.
+        // This also makes sense, since we need observations in order to
+        // say anything about how the bias estimates should be updated.
+
         // Fill elements into lower part, since covariance are symmetric.
         self.covariance.fill_lower_triangle_with_upper_triangle();
 
-        // Add noise variance
+        // Add process noise based on the continuous-time model
+        let dt2 = dt * dt;
+        let dt3 = dt2 * dt;
+        let q_pos = self.acc_noise_psd * (1.0/3.0 * dt3);
+        let q_pos_vel = self.acc_noise_psd * (1.0/2.0 * dt2);
+        let q_vel = self.acc_noise_psd * dt;
+
+        // Add primary diagonal terms
         let mut diagonal = self.covariance.diagonal();
         diagonal
+            .fixed_view_mut::<3, 1>(0, 0)
+            .add_assign(q_pos);
+        diagonal
             .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(self.acc_noise_var * dt.powi(2));
+            .add_assign(q_vel);
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
-            .add_assign(self.gyr_noise_var * dt.powi(2));
+            .add_assign(self.gyr_noise_psd * dt);
         diagonal
             .fixed_view_mut::<3, 1>(9, 0)
-            .add_assign(self.acc_bias_var * dt);
+            .add_assign(self.acc_bias_psd * dt);
         diagonal
             .fixed_view_mut::<3, 1>(12, 0)
-            .add_assign(self.gyr_bias_var * dt);
+            .add_assign(self.gyr_bias_psd * dt);
+
         self.covariance.set_diagonal(&diagonal);
+
+        // Add off-diagonal position-velocity noise
+        let q_pv_diag = SMatrix::from_diagonal(&q_pos_vel);
+        self.covariance
+            .fixed_view_mut::<3, 3>(0, 3)
+            .add_assign(&q_pv_diag);
+        self.covariance
+            .fixed_view_mut::<3, 3>(3, 0)
+            .add_assign(&q_pv_diag);
     }
 
     /// Update the filter with a generic observation
     ///
     /// # Arguments
     /// - `jacobian` is the measurement Jacobian matrix
-    /// - `difference` is the difference between the measured and the estimated state
+    /// - `residual` is the error between the measured and the estimated state
     /// - `variance` is the uncertainty of the observation
     pub fn update<const R: usize>(
         &mut self,
         jacobian: SMatrix<f32, R, 15>,
-        difference: SVector<f32, R>,
+        residual: SVector<f32, R>,
         variance: SMatrix<f32, R, R>,
-    ) -> Result<()> {
+    ) -> Res<()> {
         // Correct filter based on Kalman gain
-        let kalman_gain = self.covariance
-            * &jacobian.transpose()
-            * (&jacobian * self.covariance * &jacobian.transpose() + &variance)
-                .try_inverse()
-                .ok_or(Error::InversionError)?;
-        let error_state = &kalman_gain * difference;
+        let cov_x_jacob = self.covariance * &jacobian.transpose();
+        let innovation_cov = &jacobian * cov_x_jacob + &variance;
+        let innovation_cov_inv = innovation_cov.try_inverse().ok_or(Error::InversionError)?;
+        let kalman_gain = cov_x_jacob * innovation_cov_inv;
+
+        let error_state = &kalman_gain * residual;
+
         // Update the covariance based on the observed filter state
-        if cfg!(feature = "cov-symmetric") {
-            self.covariance -= &kalman_gain
-                * (&jacobian * self.covariance * &jacobian.transpose() + &variance)
-                * &kalman_gain.transpose();
-        } else if cfg!(feature = "cov-joseph") {
-            let step1 = SMatrix::<f32, 15, 15>::identity() - &kalman_gain * &jacobian;
+        if cfg!(feature = "cov-joseph") {
+            let step1 = SMatrix::identity() - &kalman_gain * &jacobian;
             let step2 = &kalman_gain * &variance * &kalman_gain.transpose();
             self.covariance = step1 * self.covariance * step1.transpose() + step2;
         } else {
-            self.covariance =
-                (SMatrix::<f32, 15, 15>::identity() - &kalman_gain * &jacobian) * self.covariance;
+            self.covariance -= &kalman_gain * &innovation_cov * &kalman_gain.transpose();
+        }
+
+        self.update_finalize(error_state)
+    }
+
+    /// Update the filter with a generic observation, where the jacobian is
+    /// identity. If this is not the case, see [`NavigationFilter::update`].
+    ///
+    /// # Arguments
+    /// - `index` is the start index of the identity jacobian
+    /// - `residual` is the error between the measured and the estimated state
+    /// - `variance` is the uncertainty of the observation
+    pub fn update_identity<const R: usize>(
+        &mut self,
+        index: usize,
+        residual: SVector<f32, R>,
+        variance: SMatrix<f32, R, R>,
+    ) -> Res<()> {
+        // When the jacobian is identity, many matrix-matrix multiplications
+        // will simplify to just extracting a sub-matrix view, so we might as
+        // well do that directly here.
+        let cov_x_jacob = self.covariance.fixed_view::<15, R>(0, index);
+        let innovation_cov = self.covariance.fixed_view::<R, R>(index, index) + &variance;
+        let innovation_cov_inv = innovation_cov.try_inverse().ok_or(Error::InversionError)?;
+        let kalman_gain = cov_x_jacob * innovation_cov_inv;
+
+        let error_state = &kalman_gain * residual;
+
+        // Update the covariance based on the observed filter state
+        if cfg!(feature = "cov-joseph") {
+            let mut step1 = SMatrix::<f32, 15, 15>::identity();
+            step1
+                .fixed_view_mut::<15, R>(0, index)
+                .sub_assign(&kalman_gain);
+            let step2 = &kalman_gain * &variance * &kalman_gain.transpose();
+            self.covariance = step1 * self.covariance * step1.transpose() + step2;
+        } else {
+            self.covariance -= &kalman_gain * &innovation_cov * &kalman_gain.transpose();
         }
 
         self.update_finalize(error_state)
@@ -398,23 +445,64 @@ impl ESKF {
     /// # Arguments
     /// - `error_state` is the error state calculated by the [`ESKF::update`] function
     #[inline(never)]
-    fn update_finalize(&mut self, error_state: SVector<f32, 15>) -> Result<()> {
-        // Inject error state into nominal
+    fn update_finalize(&mut self, error_state: SVector<f32, 15>) -> Res<()> {
+        // Inject error state into nominal state
         self.position += error_state.fixed_view::<3, 1>(0, 0);
         self.velocity += error_state.fixed_view::<3, 1>(3, 0);
         self.rotation *= UnitQuaternion::from_scaled_axis(error_state.fixed_view::<3, 1>(6, 0));
         self.acc_bias += error_state.fixed_view::<3, 1>(9, 0);
         self.gyr_bias += error_state.fixed_view::<3, 1>(12, 0);
 
-        // Perform full ESKF reset
-        //
-        // Since the rotation error is usually relatively small this step can be skipped, but
-        // the full formulation can lead to better stability of the filter
         if cfg!(feature = "full-reset") {
-            let mut g = SMatrix::<f32, 15, 15>::identity();
-            g.fixed_view_mut::<3, 3>(6, 6)
-                .sub_assign(0.5 * skew(&error_state.fixed_view::<3, 1>(6, 0).clone_owned()));
-            self.covariance = g * self.covariance * g.transpose();
+            // Get the 3x3 rotation-reset block
+            let error_rot = error_state.fixed_view::<3, 1>(6, 0).clone_owned();
+            let g_rot = SMatrix::<f32, 3, 3>::identity() - skew(error_rot) * 0.5;
+            let g_rot_t = g_rot.transpose();
+
+            // Clone the blocks we need from the upper triangle
+            let p_pos_rot = self.covariance.fixed_view::<3, 3>(0, 6);
+            let p_vel_rot = self.covariance.fixed_view::<3, 3>(3, 6);
+            let p_rot_rot = self.covariance.fixed_view::<3, 3>(6, 6);
+            let p_rot_acc = self.covariance.fixed_view::<3, 3>(6, 9);
+            let p_rot_gyr = self.covariance.fixed_view::<3, 3>(6, 12);
+
+            // Perform the cheaper 3x3 multiplications
+            let p_pos_rot_new = p_pos_rot * g_rot_t;
+            let p_vel_rot_new = p_vel_rot * g_rot_t;
+            let p_rot_rot_new = g_rot * p_rot_rot * g_rot_t;
+            let p_rot_acc_new = g_rot * p_rot_acc;
+            let p_rot_gyr_new = g_rot * p_rot_gyr;
+
+            // Write the new values back to the covariance matrix
+            self.covariance
+                .fixed_view_mut::<3, 3>(0, 6)
+                .copy_from(&p_pos_rot_new);
+            self.covariance
+                .fixed_view_mut::<3, 3>(3, 6)
+                .copy_from(&p_vel_rot_new);
+            self.covariance
+                .fixed_view_mut::<3, 3>(6, 6)
+                .copy_from(&p_rot_rot_new);
+            self.covariance
+                .fixed_view_mut::<3, 3>(6, 9)
+                .copy_from(&p_rot_acc_new);
+            self.covariance
+                .fixed_view_mut::<3, 3>(6, 12)
+                .copy_from(&p_rot_gyr_new);
+
+            // And the transposed go into the lower triangle
+            self.covariance
+                .fixed_view_mut::<3, 3>(6, 0)
+                .copy_from(&p_pos_rot_new.transpose());
+            self.covariance
+                .fixed_view_mut::<3, 3>(6, 3)
+                .copy_from(&p_vel_rot_new.transpose());
+            self.covariance
+                .fixed_view_mut::<3, 3>(9, 6)
+                .copy_from(&p_rot_acc_new.transpose());
+            self.covariance
+                .fixed_view_mut::<3, 3>(12, 6)
+                .copy_from(&p_rot_gyr_new.transpose());
         }
 
         // Ensure rotation stays consistent
@@ -423,106 +511,30 @@ impl ESKF {
         Ok(())
     }
 
-    /// Observe the position and velocity in the X and Y axis
-    ///
-    /// Most GPS units are capable of observing both position and velocity, by combining these two
-    /// measurements into one update we should be able to reduce the computational complexity. Also
-    /// note that GPS velocity tends to be more precise than position.
-    pub fn observe_position_velocity2d(
-        &mut self,
-        position: Point3<f32>,
-        position_var: Matrix3<f32>,
-        velocity: Vector2<f32>,
-        velocity_var: Matrix2<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 5, 15>::zeros();
-        jacobian.fixed_view_mut::<5, 5>(0, 0).fill_with_identity();
-
-        let mut diff = SVector::<f32, 5>::zeros();
-        diff.fixed_view_mut::<3, 1>(0, 0)
-            .copy_from(&(position - self.position));
-        diff.fixed_view_mut::<2, 1>(3, 0)
-            .copy_from(&(velocity - self.velocity.xy()));
-
-        let mut var = SMatrix::<f32, 5, 5>::zeros();
-        var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
-        var.fixed_view_mut::<2, 2>(3, 3).copy_from(&velocity_var);
-
-        self.update(jacobian, diff, var)
-    }
-
-    /// Observe the position and velocity
-    ///
-    /// Most GPS units are capable of observing both position and velocity, by combining these two
-    /// measurements into one update we should be able to reduce the computational complexity. Also
-    /// note that GPS velocity tends to be more precise than position.
-    pub fn observe_position_velocity(
-        &mut self,
-        position: Point3<f32>,
-        position_var: Matrix3<f32>,
-        velocity: Vector3<f32>,
-        velocity_var: Matrix3<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 6, 15>::zeros();
-        jacobian.fixed_view_mut::<6, 6>(0, 0).fill_with_identity();
-
-        let mut diff = SVector::<f32, 6>::zeros();
-        diff.fixed_view_mut::<3, 1>(0, 0)
-            .copy_from(&(position - self.position));
-        diff.fixed_view_mut::<3, 1>(3, 0)
-            .copy_from(&(velocity - self.velocity));
-
-        let mut var = SMatrix::<f32, 6, 6>::zeros();
-        var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
-        var.fixed_view_mut::<3, 3>(3, 3).copy_from(&velocity_var);
-
-        self.update(jacobian, diff, var)
-    }
-
-    /// Update the filter with an observation of the position
+    /// Update the filter with an observation of the position.
     pub fn observe_position(
         &mut self,
-        position: Point3<f32>,
-        position_var: Matrix3<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
-        jacobian.fixed_view_mut::<3, 3>(0, 0).fill_with_identity();
+        position: SVector<f32, 3>,
+        position_var: SMatrix<f32, 3, 3>,
+    ) -> Res<()> {
         let diff = position - self.position;
-        self.update(jacobian, diff, position_var)
+        self.update_identity(0, diff, position_var)
     }
 
-    /// Update the filter with an observation of the height alone
-    pub fn observe_height(&mut self, height: f32, height_var: f32) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 1, 15>::zeros();
-        jacobian.fixed_view_mut::<1, 1>(0, 2).fill_with_identity();
-        let diff = SVector::<f32, 1>::new(height - self.position.z);
-        let var = SMatrix::<f32, 1, 1>::new(height_var);
-        self.update(jacobian, diff, var)
-    }
-
-    /// Update the filter with an observation of the position and rotation
-    pub fn observe_position_rotation(
+    /// Update the filter with an observation of the position in the x-y plane.
+    pub fn observe_position_xy(
         &mut self,
-        position: Point3<f32>,
-        position_var: Matrix3<f32>,
-        rotation: UnitQuaternion<f32>,
-        rotation_var: Matrix3<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 6, 15>::zeros();
-        jacobian.fixed_view_mut::<3, 3>(0, 0).fill_with_identity();
-        jacobian.fixed_view_mut::<3, 3>(3, 6).fill_with_identity();
+        position_xy: SVector<f32, 2>,
+        position_xy_var: SMatrix<f32, 2, 2>,
+    ) -> Res<()> {
+        let diff = position_xy - self.position.xy();
+        self.update_identity(0, diff, position_xy_var)
+    }
 
-        let mut diff = SVector::<f32, 6>::zeros();
-        diff.fixed_view_mut::<3, 1>(0, 0)
-            .copy_from(&(position - self.position));
-        diff.fixed_view_mut::<3, 1>(3, 0)
-            .copy_from(&(self.rotation.inverse() * rotation).scaled_axis());
-
-        let mut var = SMatrix::<f32, 6, 6>::zeros();
-        var.fixed_view_mut::<3, 3>(0, 0).copy_from(&position_var);
-        var.fixed_view_mut::<3, 3>(3, 3).copy_from(&rotation_var);
-
-        self.update(jacobian, diff, var)
+    /// Update the filter with an observation of the z-position only.
+    pub fn observe_position_z(&mut self, position_z: f32, position_z_var: f32) -> Res<()> {
+        let diff = position_z - self.position.z;
+        self.update_identity(2, [diff].into(), [position_z_var].into())
     }
 
     /// Update the filter with an observation of the velocity
@@ -533,13 +545,11 @@ impl ESKF {
     /// the filter, e.g. `filter.rotation.transform_vector(&relative_measurement)`.
     pub fn observe_velocity(
         &mut self,
-        velocity: Vector3<f32>,
-        velocity_var: Matrix3<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
-        jacobian.fixed_view_mut::<3, 3>(0, 3).fill_with_identity();
+        velocity: SVector<f32, 3>,
+        velocity_var: SMatrix<f32, 3, 3>,
+    ) -> Res<()> {
         let diff = velocity - self.velocity;
-        self.update(jacobian, diff, velocity_var)
+        self.update_identity(3, diff, velocity_var)
     }
 
     /// Update the filter with an observation of the velocity in only the `[X, Y]` axis
@@ -548,34 +558,36 @@ impl ESKF {
     /// If the observation comes from a sensor relative to the filter, e.g. an optical flow sensor
     /// that turns with the UAV, the sensor values **needs** to be rotated into the same frame as
     /// the filter, e.g. `filter.rotation.transform_vector(&relative_measurement)`.
-    pub fn observe_velocity2d(
+    pub fn observe_velocity_xy(
         &mut self,
-        velocity: Vector2<f32>,
-        velocity_var: Matrix2<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 2, 15>::zeros();
-        jacobian.fixed_view_mut::<2, 2>(0, 3).fill_with_identity();
-        let diff = Vector2::new(velocity.x - self.velocity.x, velocity.y - self.velocity.y);
-        self.update(jacobian, diff, velocity_var)
+        velocity: SVector<f32, 2>,
+        velocity_var: SMatrix<f32, 2, 2>,
+    ) -> Res<()> {
+        let diff = velocity - self.velocity.xy();
+        self.update_identity(3, diff, velocity_var)
+    }
+
+    /// Update the filter with an observation of the velocity in the x-y axis
+    pub fn observe_velocity_z(&mut self, velocity: f32, velocity_var: f32) -> Res<()> {
+        let diff = velocity - self.velocity.z;
+        self.update_identity(5, [diff].into(), [velocity_var].into())
     }
 
     /// Update the filter with an observation of the rotation
     pub fn observe_rotation(
         &mut self,
         rotation: UnitQuaternion<f32>,
-        rotation_var: Matrix3<f32>,
-    ) -> Result<()> {
-        let mut jacobian = SMatrix::<f32, 3, 15>::zeros();
-        jacobian.fixed_view_mut::<3, 3>(0, 6).fill_with_identity();
+        rotation_var: SMatrix<f32, 3, 3>,
+    ) -> Res<()> {
         let diff = (self.rotation.inverse() * rotation).scaled_axis();
-        self.update(jacobian, diff, rotation_var)
+        self.update_identity(6, diff, rotation_var)
     }
 }
 
 /// Create the skew-symmetric matrix from a vector
 #[rustfmt::skip]
-fn skew(v: &Vector3<f32>) -> Matrix3<f32> {
-    Matrix3::new(0., -v.z, v.y,
+fn skew(v: SVector<f32, 3>) -> SMatrix<f32, 3, 3> {
+    SMatrix::<f32, 3, 3>::new(0., -v.z, v.y,
                  v.z, 0., -v.x,
                  -v.y, v.x, 0.)
 }
@@ -583,29 +595,29 @@ fn skew(v: &Vector3<f32>) -> Matrix3<f32> {
 #[cfg(test)]
 mod test {
     use approx::assert_relative_eq;
-    use nalgebra::{Point3, UnitQuaternion, Vector3};
+    use nalgebra::{UnitQuaternion, Vector3};
     use std::f32::consts::FRAC_PI_2;
     use std::time::Duration;
 
-    use crate::ESKF;
+    use crate::NavigationFilter;
 
     #[test]
     fn creation() {
-        let filter = ESKF::new();
-        assert_relative_eq!(filter.position, Point3::origin());
+        let filter = NavigationFilter::new();
+        assert_relative_eq!(filter.position, Vector3::zeros());
         assert_relative_eq!(filter.velocity, Vector3::zeros());
     }
 
     #[test]
     fn linear_motion() {
-        let mut filter = ESKF::new();
+        let mut filter = NavigationFilter::new();
         // Some initial motion to move the filter
         filter.predict(
             Vector3::new(1.0, 0.0, -9.81),
             Vector3::zeros(),
             Duration::from_millis(1000).as_secs_f32(),
         );
-        assert_relative_eq!(filter.position, Point3::new(0.5, 0.0, 0.0));
+        assert_relative_eq!(filter.position, Vector3::new(0.5, 0.0, 0.0));
         assert_relative_eq!(filter.velocity, Vector3::new(1.0, 0.0, 0.0));
         // There should be no rotation change from the above motion
         assert_relative_eq!(filter.rotation, UnitQuaternion::identity());
@@ -615,7 +627,7 @@ mod test {
             Vector3::zeros(),
             Duration::from_millis(500).as_secs_f32(),
         );
-        assert_relative_eq!(filter.position, Point3::new(1.0, 0.0, 0.0));
+        assert_relative_eq!(filter.position, Vector3::new(1.0, 0.0, 0.0));
         assert_relative_eq!(filter.velocity, Vector3::new(1.0, 0.0, 0.0));
         assert_relative_eq!(filter.rotation, UnitQuaternion::identity());
         filter.predict(
@@ -623,14 +635,14 @@ mod test {
             Vector3::zeros(),
             Duration::from_millis(1000).as_secs_f32(),
         );
-        assert_relative_eq!(filter.position, Point3::new(1.5, -0.5, 0.0));
+        assert_relative_eq!(filter.position, Vector3::new(1.5, -0.5, 0.0));
         assert_relative_eq!(filter.velocity, Vector3::new(0.0, -1.0, 0.0));
         assert_relative_eq!(filter.rotation, UnitQuaternion::identity());
     }
 
     #[test]
     fn rotational_motion() {
-        let mut filter = ESKF::new();
+        let mut filter = NavigationFilter::new();
         // Note that this motion is a free fall rotation
         filter.predict(
             Vector3::zeros(),
@@ -652,7 +664,7 @@ mod test {
         );
         // We reset the filter here so that the following equalities are not affected by existing
         // motion in the filter
-        let mut filter = ESKF::new();
+        let mut filter = NavigationFilter::new();
         filter.predict(
             Vector3::zeros(),
             Vector3::new(0.0, -FRAC_PI_2, 0.0),

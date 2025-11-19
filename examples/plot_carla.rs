@@ -1,5 +1,5 @@
 //! Example which reads data from the CARLA dataset and plots filter state
-use nalgebra::{Point3, Vector3, SMatrix};
+use nalgebra::{Point3, SMatrix, Vector3};
 use plotly::common::{ErrorData, ErrorType};
 use plotly::layout::{GridPattern, Layout, LayoutGrid};
 use plotly::{Plot, Scatter};
@@ -117,17 +117,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(dataset_name)?;
     let reader = BufReader::new(file);
     let dataset: Dataset = serde_json::from_reader(reader)?;
-    let position_variance =
-        SMatrix::from_diagonal_element(dataset.variance.gnss_position.sqrt());
+    let position_variance = SMatrix::from_diagonal_element(dataset.variance.gnss_position.sqrt());
     // Create lines that we want to plot
     let mut plot_pos = PlotRow::default();
     let mut plot_vel = PlotRow::default();
     // Create filter based on dataset
-    let mut filter = eskf::ESKF::new().with_mut(|filt| {
-        filt.acc_noise_std(dataset.variance.imu_acceleration)
-            .gyr_noise_std(dataset.variance.imu_rotation)
-            .covariance_diag(1e-1);
-    });
+    let mut filter = eskf_rs::NavigationFilter::new()
+        .acc_noise_density(dataset.variance.imu_acceleration.sqrt())
+        .gyr_noise_density(dataset.variance.imu_rotation.sqrt())
+        .covariance_diag_element(1e-1);
+
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
     // Time delta is based on viewing the dataset and choosing a small value that could fit
@@ -151,20 +150,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(position) = m.gnss.position {
             positions += 1;
             filter
-                .observe_position(position, position_variance)
+                .observe_position(position.coords, position_variance)
                 .expect("Filter observation failed");
         }
         plot_pos.add(
             i as f32,
-            &filter.position.coords,
+            &filter.position,
             &m.ground_truth.position.coords,
-            &filter.position_variance(),
+            &filter.position_uncertainty(),
         );
         plot_vel.add(
             i as f32,
             &filter.velocity,
             &m.ground_truth.velocity,
-            &filter.velocity_variance(),
+            &filter.velocity_uncertainty(),
         );
     }
     let duration = time_now.elapsed();

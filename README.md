@@ -12,23 +12,22 @@ explicitly.
 The navigation filter is used to track `position`, `velocity` and `orientation`
 of an object which is sensing its state through an [Inertial Measurement Unit
 (IMU)](https://en.wikipedia.org/wiki/Inertial_measurement_unit) and some means
-of observing the true state of the filter such as GPS, LIDAR or visual odometry. 
+of observing the true state of the filter such as GPS, LIDAR or visual odometry.
 Additionally, the bias of the accelerometer and gyroscope belonging to the IMU
 is estimated for even more accurate estimation.
 
 ## Usage
 ```rust
-use eskf::ESKF;
-use nalgebra::{SMatrix, Vector3, Point3};
+use eskf::NavigationFilter;
+use nalgebra::{SMatrix, Vector3};
 
 // Create the filter and configure the parameters.
-let mut filter = ESKF::new();
-filt.acc_noise_std(0.05);
-filt.gyr_noise_std(0.01);
-filt.acc_bias_std(0.001);
-filt.acc_bias_std(0.001);
-filt.covariance_diag(0.2);
-filt.with_gravity(Vector3::z() * 9.81);
+let mut filter = NavigationFilter::new()
+    .acc_noise_density(0.005);
+    .gyr_noise_density(0.002);
+    .acc_bias_random_walk(0.0001);
+    .acc_bias_random_walk(0.0001);
+    .with_gravity(Vector3::z() * 9.81);
 
 loop {
 
@@ -36,13 +35,13 @@ loop {
     // we might just select over some futures which yields the measurements.
     match select(
         imu_sensor.read_6dof(),
-        pos_sensor.read_position()
+        motion_sensor.read(),
     ).await {
         First(imu_data) => {
             // The IMU measurements are automatically adjusted using the
             // estimated bias, and rotated into the global reference frame
             // to update the position, velocity and rotation estimates.
-            filter.predict_optimized(
+            filter.predict(
                 imu_data.acc.into(),
                 imu_data.gyr.into(),
             );
@@ -52,16 +51,21 @@ loop {
             let vel = filter.velocity;
             let rot = filter.rotation;
         },
-        Second(pos_data) => {
+        Second(motion_data) => {
+
+            // We may make multiple observations sequentially. As long as we assume little to no cross-covariance between the observations this is fine.
             if filter.observe_position(
-                Point3::new(pos_data.x, pos_data.y, pos_data.z),
-                SMatrix::from_diagonal_element(pos_data.var),
+                Vector3::from(motion_data.position),
+                SMatrix::from_diagonal_element(motion_data.pos_var),
             ).is_err() {
-                // This is a basic way to handle the error case. It might also
-                // be fine to initially skip the observation, and let the
-                // covariance evolve a bit until the next observation.
-                defmt::error!("[eskf] Could not compute, resetting covariance");
-                filt.covariance_diag(0.2);
+                defmt::error!("[eskf] Failure during velocity observation");
+            }
+
+            if filter.observe_velocity(
+                Vector3::from(motion_data.velocity),
+                SMatrix::from_diagonal_element(motion_data.vel_var),
+            ).is_err() {
+                defmt::error!("[eskf] Failure during velocity observation");
             }
         }
     }

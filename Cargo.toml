@@ -1,9 +1,9 @@
 [package]
-name = "eskf"
-version = "0.5.0"
+name = "eskf_rs"
+version = "0.6.0"
 authors = ["Jørgen Nordmoen <jorgen@nordmoen.net>", "Peter Krull <peterkrullpeter@gmail.com>"]
 description = "Navigation filter based on an Error State Kalman Filter (ESKF)"
-keywords = ["navigation", "filter", "attitude", "kalman"]
+keywords = ["navigation", "kalman", "filter", "attitude"]
 license = "MIT OR Apache-2.0"
 categories = ["embedded", "no-std", "mathematics", "science::robotics"]
 edition = "2024"
@@ -17,8 +17,6 @@ exclude = ["docs/*"]
 default = ["full-reset"]
 # Perform a full filter reset during measurement update
 full-reset = []
-# A more stable covariance update, but more computationally expensive
-cov-symmetric = []
 # Stable, symmetric and positive covariance update, computationally expensive
 cov-joseph = []
 # Enable to use in no_std environment
@@ -39,7 +37,3 @@ criterion = "*"
 [[example]]
 name = "plot_carla"
 required-features = []
-
-[[bench]]
-name = "optimized_benchmark"
-harness = false

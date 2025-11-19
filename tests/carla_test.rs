@@ -1,7 +1,6 @@
 //! Integration tests which uses data from the [CARLA simulator](https://carla.org/)
 use approx::assert_relative_eq;
-use eskf;
-use nalgebra::{Point3, UnitQuaternion, Vector3, SMatrix};
+use nalgebra::{Point3, SMatrix, UnitQuaternion, Vector3};
 use serde::Deserialize;
 use serde_json;
 use std::fs::File;
@@ -55,14 +54,12 @@ fn dataset1() {
         File::open("tests/carla_dataset1.json").expect("Could not open 'tests/carla_dataset1.json");
     let reader = BufReader::new(file);
     let dataset: Dataset = serde_json::from_reader(reader).expect("Could not parse JSON");
-    let position_variance =
-        SMatrix::from_diagonal_element(dataset.variance.gnss_position.sqrt());
+    let position_variance = SMatrix::from_diagonal_element(dataset.variance.gnss_position);
     // Create filter based on dataset
-    let mut filter = eskf::ESKF::new().with_mut(|filt| {
-        filt.acc_noise_std(dataset.variance.imu_acceleration)
-            .gyr_noise_std(dataset.variance.imu_rotation)
-            .covariance_diag(1e-1);
-    });
+    let mut filter = eskf_rs::NavigationFilter::new()
+        .acc_noise_density(dataset.variance.imu_acceleration)
+        .gyr_noise_density(dataset.variance.imu_rotation)
+        .covariance_diag_element(1e-1);
 
     // Insert a first measurement into the filter
     let m = &dataset.data[0];
@@ -83,7 +80,7 @@ fn dataset1() {
         filter.predict(m.imu.acceleration, m.imu.rotation, delta.as_secs_f32());
         if let Some(position) = m.gnss.position {
             filter
-                .observe_position(position, position_variance)
+                .observe_position(position.coords, position_variance)
                 .expect("Position observation failed");
         }
 
@@ -94,18 +91,18 @@ fn dataset1() {
         );
         assert_relative_eq!(
             filter.position,
-            m.ground_truth.position,
-            epsilon = filter.position_variance().norm()
+            m.ground_truth.position.coords,
+            epsilon = filter.position_uncertainty().norm()
         );
         assert_relative_eq!(
             filter.velocity,
             m.ground_truth.velocity,
-            epsilon = filter.velocity_variance().norm()
+            epsilon = filter.velocity_uncertainty().norm()
         );
         assert_relative_eq!(
             filter.rotation,
             gt_orient,
-            epsilon = filter.rotation_variance().norm()
+            epsilon = filter.rotation_uncertainty().norm()
         );
     }
 }
