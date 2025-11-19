@@ -1,6 +1,6 @@
 # Embeddable navigation filter
 
-This is a fork of [eskf-rs](https://github.com/nordmoen/eskf-rs/) tailored for `no_std` embedded environments with all statically allocated matrices, and an unrolled prediction function for much better performance. An STM32F405 is able to do a full integration of IMU measurements and prediction, including the 15x15 covariance propagation, in approximately 38 µs. This implementation is thus suitable embedded for real-time estimation.
+This is a fork of [eskf-rs](https://github.com/nordmoen/eskf-rs/) tailored for `no_std` and embedded environments with all statically allocated matrices, and unrolled sparse matrix operations for much better performance. An STM32F405 is able to do a full integration of IMU measurements and prediction, including the 15x15 covariance propagation, in approximately 38 µs. This implementation is thus suitable for embedded real-time estimation.
 
 ## Error State Kalman Filter (ESKF)
 An [Error State Kalman Filter](https://arxiv.org/abs/1711.02508) is a navigation
@@ -18,7 +18,7 @@ is estimated for even more accurate estimation.
 
 ## Usage
 ```rust
-use eskf::NavigationFilter;
+use eskf_rs::NavigationFilter;
 use nalgebra::{SMatrix, Vector3};
 
 // Create the filter and configure the parameters.
@@ -28,6 +28,9 @@ let mut filter = NavigationFilter::new()
     .acc_bias_random_walk(0.0001);
     .acc_bias_random_walk(0.0001);
     .with_gravity(Vector3::z() * 9.81);
+
+// Alternatively, this can be calculated on the go
+const IMU_SAMPLE_TIME: f32 = 1. / 1000.;
 
 loop {
 
@@ -44,6 +47,7 @@ loop {
             filter.predict(
                 imu_data.acc.into(),
                 imu_data.gyr.into(),
+                IMU_SAMPLE_TIME as f32,
             );
 
             // Now we can use the estimates (see "Usage tip" below)
