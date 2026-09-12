@@ -1,6 +1,11 @@
 # Embeddable navigation filter
 
-This is a fork of [eskf-rs](https://github.com/nordmoen/eskf-rs/) tailored for `no_std` and embedded environments with all statically allocated matrices, and unrolled sparse matrix operations for much better performance. An STM32F405 is able to do a full integration of IMU measurements and prediction, including the 15x15 covariance propagation, in approximately 38 µs. This implementation is thus suitable for embedded real-time estimation.
+This is a fork of [eskf-rs](https://github.com/nordmoen/eskf-rs/) tailored for
+`no_std` and embedded environments with all statically allocated matrices, and
+unrolled sparse matrix operations for much better performance. An STM32F405 is
+able to do a full integration of IMU measurements and prediction, including the
+15x15 covariance propagation, in approximately 38 µs. This implementation is 
+thus suitable for embedded real-time estimation.
 
 ## Error State Kalman Filter (ESKF)
 An [Error State Kalman Filter](https://arxiv.org/abs/1711.02508) is a navigation
@@ -13,8 +18,8 @@ The navigation filter is used to track `position`, `velocity` and `orientation`
 of an object which is sensing its state through an [Inertial Measurement Unit
 (IMU)](https://en.wikipedia.org/wiki/Inertial_measurement_unit) and some means
 of observing the true state of the filter such as GPS, LIDAR or visual odometry.
-Additionally, the bias of the accelerometer and gyroscope belonging to the IMU
-is estimated for even more accurate estimation.
+Additionally, the biases of the accelerometer and gyroscope belonging to the IMU
+are estimated for even more accurate estimation.
 
 ## Usage
 ```rust
@@ -57,7 +62,8 @@ loop {
         },
         Second(motion_data) => {
 
-            // We may make multiple observations sequentially. As long as we assume little to no cross-covariance between the observations this is fine.
+            // We may make multiple observations sequentially. As long as we assume
+            // little to no cross-covariance between the observations this is fine.
             if filter.observe_position(
                 Vector3::from(motion_data.position),
                 SMatrix::from_diagonal_element(motion_data.pos_var),
@@ -78,4 +84,11 @@ loop {
 
 ### Usage tip
 
-While the Kalman filter is optimal in the least-squares sense, it might not be ideal to use some of its values directily. Specifically, the position estimate is likely to "jump" slightly whenever a new observation makes a correction. This could result in large derivative spikes for a position controller. However, complimentary filtering the estimated position and velocity can yield a much smoother and less jumpy position estimate, without losing any useful high frequency information.
+While the Kalman filter is optimal in the least-squares sense, it might not
+be ideal to use some of its values directly. Notably, the position estimate
+is likely to "jump" slightly whenever a new observation makes a correction.
+This could result in large derivative spikes for a position controller. 
+
+However, complementary filtering the estimated position and velocity can
+yield a much smoother and less jumpy position estimate, without losing any
+useful high frequency information.
