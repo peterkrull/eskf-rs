@@ -23,10 +23,10 @@ use nalgebra::{SMatrix, Vector3};
 
 // Create the filter and configure the parameters.
 let mut filter = NavigationFilter::new()
-    .acc_noise_density(0.005);
-    .gyr_noise_density(0.002);
-    .acc_bias_random_walk(0.0001);
-    .acc_bias_random_walk(0.0001);
+    .acc_noise_density(0.005)
+    .gyr_noise_density(0.002)
+    .acc_bias_random_walk(0.0001)
+    .acc_bias_random_walk(0.0001)
     .with_gravity(Vector3::z() * 9.81);
 
 // Alternatively, this can be calculated on the go

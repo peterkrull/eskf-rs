@@ -10,18 +10,16 @@ edition = "2024"
 readme = "README.md"
 homepage = "https://github.com/peterkrull/eskf-rs"
 repository = "https://github.com/peterkrull/eskf-rs"
-documentation = "https://docs.rs/eskf"
-exclude = ["docs/*"]
 
 [features]
-default = ["std"]
+default = ["full-reset", "std"]
 
 # Perform a full filter reset during measurement update
 full-reset = []
 # Stable and symmetric covariance update, computationally expensive
 cov-joseph = []
 
-# Enable to use in no_std environment usibng libm
+# Enable to use in no_std environment using libm
 no_std = ["nalgebra/libm", "num-traits/libm"]
 # Enable to use in std environment
 std = ["nalgebra/std"]
@@ -36,7 +34,6 @@ nalgebra = { version = "~0.34", features = ["serde-serialize", "debug"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 plotly = "0.6.0"
-criterion = "*"
 
 [[example]]
 name = "plot_carla"
