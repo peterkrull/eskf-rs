@@ -14,13 +14,17 @@ documentation = "https://docs.rs/eskf"
 exclude = ["docs/*"]
 
 [features]
-default = ["full-reset"]
+default = ["std"]
+
 # Perform a full filter reset during measurement update
 full-reset = []
-# Stable, symmetric and positive covariance update, computationally expensive
+# Stable and symmetric covariance update, computationally expensive
 cov-joseph = []
-# Enable to use in no_std environment
+
+# Enable to use in no_std environment usibng libm
 no_std = ["nalgebra/libm", "num-traits/libm"]
+# Enable to use in std environment
+std = ["nalgebra/std"]
 
 [dependencies]
 nalgebra = { version = "~0.34", default-features = false }

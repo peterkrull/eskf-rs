@@ -84,11 +84,8 @@ impl Default for NavigationFilter {
             gravity: SVector::z() * 9.81,
             covariance: SMatrix::from_diagonal(
                 &[
-                    0.2, 0.2, 0.2,
-                    0.02, 0.02, 0.02,
-                    0.05, 0.05, 0.05,
-                    1e-4, 1e-4, 1e-4, 
-                    1e-4, 1e-4, 1e-4,
+                    0.2, 0.2, 0.2, 0.02, 0.02, 0.02, 0.05, 0.05, 0.05, 1e-4, 1e-4, 1e-4, 1e-4,
+                    1e-4, 1e-4,
                 ]
                 .into(),
             ),
@@ -336,18 +333,14 @@ impl NavigationFilter {
         // Add process noise based on the continuous-time model
         let dt2 = dt * dt;
         let dt3 = dt2 * dt;
-        let q_pos = self.acc_noise_psd * (1.0/3.0 * dt3);
-        let q_pos_vel = self.acc_noise_psd * (1.0/2.0 * dt2);
+        let q_pos = self.acc_noise_psd * (1.0 / 3.0 * dt3);
+        let q_pos_vel = self.acc_noise_psd * (1.0 / 2.0 * dt2);
         let q_vel = self.acc_noise_psd * dt;
 
         // Add primary diagonal terms
         let mut diagonal = self.covariance.diagonal();
-        diagonal
-            .fixed_view_mut::<3, 1>(0, 0)
-            .add_assign(q_pos);
-        diagonal
-            .fixed_view_mut::<3, 1>(3, 0)
-            .add_assign(q_vel);
+        diagonal.fixed_view_mut::<3, 1>(0, 0).add_assign(q_pos);
+        diagonal.fixed_view_mut::<3, 1>(3, 0).add_assign(q_vel);
         diagonal
             .fixed_view_mut::<3, 1>(6, 0)
             .add_assign(self.gyr_noise_psd * dt);
@@ -459,7 +452,7 @@ impl NavigationFilter {
             let g_rot = SMatrix::<f32, 3, 3>::identity() - skew(error_rot) * 0.5;
             let g_rot_t = g_rot.transpose();
 
-            // Clone the blocks we need from the upper triangle
+            // Reference the blocks we need from the upper triangle
             let p_pos_rot = self.covariance.fixed_view::<3, 3>(0, 6);
             let p_vel_rot = self.covariance.fixed_view::<3, 3>(3, 6);
             let p_rot_rot = self.covariance.fixed_view::<3, 3>(6, 6);
